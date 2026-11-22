@@ -14,7 +14,7 @@ import contextlib
 import random
 import ssl
 import time
-from collections.abc import AsyncIterator, Coroutine, Mapping, Sequence
+from collections.abc import AsyncIterator, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -72,6 +72,7 @@ HOSTS = {"demo": "demo.ctraderapi.com", "live": "live.ctraderapi.com"}
 PROTOBUF_PORT = 5035
 _MAX_BARS = 1000  # bars per trendbar request we aim for; the server limit is undocumented (see probe tests)
 _SYMBOL_BATCH = 100
+_HISTORY_MAX_REQUESTS = 64  # per find_order history search (historical limit: 5 req/s)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -446,6 +447,49 @@ class CTraderBroker:
         return BrokerSnapshot(
             account=account, positions=tuple(positions), orders=tuple(orders), ts=self._now()
         )
+
+    async def find_order(self, client_order_id: str, since: datetime) -> Order | None:
+        """Open orders first (reconcile), then order history since ``since`` (carries clientOrderId).
+        The answer must be exact: the OMS resends on None and cTrader does not de-duplicate."""
+        rec = await self._reconcile()
+        if (found := self._match(rec.order, client_order_id)) is not None:
+            return found
+        start, end = to_epoch_ms(ensure_utc(since)), to_epoch_ms(self._now()) + 60_000
+        return self._match(await self._order_history(start, end), client_order_id)
+
+    def _match(self, wires: Iterable[model.ProtoOAOrder], client_order_id: str) -> Order | None:
+        for wire in wires:
+            info = self._by_id.get(wire.tradeData.symbolId)
+            if wire.clientOrderId == client_order_id and info is not None and not mp.is_internal_order(wire):
+                self._cid_to_order.setdefault(client_order_id, str(wire.orderId))
+                return mp.order_from_wire(wire, info)
+        return None
+
+    async def _order_history(self, start_ms: int, end_ms: int) -> list[model.ProtoOAOrder]:
+        """All orders updated in [start, end]. Responses are chunked (``hasMore``) with no documented order
+        or cursor, so a truncated window is bisected until every slice is complete. Past the request budget
+        this raises instead of returning a partial answer (the caller would resend on a miss)."""
+        out: list[model.ProtoOAOrder] = []
+        windows = [(start_ms, end_ms)]
+        budget = _HISTORY_MAX_REQUESTS
+        while windows:
+            lo, hi = windows.pop()
+            if budget == 0:
+                raise BrokerUnavailable("ctrader order history too dense to search exactly; retry later")
+            budget -= 1
+            res = await self._req(
+                msgs.ProtoOAOrderListReq(ctidTraderAccountId=self._ctid(), fromTimestamp=lo, toTimestamp=hi),
+                msgs.ProtoOAOrderListRes,
+                historical=True,
+            )
+            if not res.hasMore:
+                out.extend(res.order)
+            elif hi <= lo:
+                raise BrokerUnavailable("ctrader order history: more than one chunk within a millisecond")
+            else:
+                mid = (lo + hi) // 2
+                windows += [(mid + 1, hi), (lo, mid)]
+        return out
 
     async def limits(self) -> RateLimits:
         return RateLimits(buckets=(LIMIT_REQUESTS, LIMIT_HISTORICAL))

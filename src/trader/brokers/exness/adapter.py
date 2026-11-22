@@ -15,7 +15,7 @@ import random
 import time
 from collections.abc import AsyncIterator, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -151,6 +151,7 @@ class ExnessBroker:
         self._quotes: dict[str, tuple[Decimal, Decimal]] = {}
         # broker-state caches (raw JSON, keyed by Exness ids)
         self._orders: dict[str, Json] = {}  # active limit/stop orders
+        self._finished: dict[str, Json] = {}  # recently finished orders (for find_order), bounded
         self._sltp: dict[str, Json] = {}  # position_id -> active sltp order
         self._positions: dict[str, Json] = {}
         self._account_state: Json = {}
@@ -183,6 +184,7 @@ class ExnessBroker:
             candle_history=dict(mp.HISTORY_DEPTH),
             max_candles_per_request=self._limits.candles_per_request,
             sync_order_result=False,
+            idempotent_submit=True,  # same key + payload -> the original operation, not executed again
         )
 
     def _acct(self) -> str:
@@ -472,6 +474,10 @@ class ExnessBroker:
             self._orders[oid] = o
         else:
             self._orders.pop(oid, None)
+            if o.get("order_type") in ("market", "limit", "stop"):
+                self._finished[oid] = o
+                while len(self._finished) > 5_000:
+                    del self._finished[next(iter(self._finished))]
 
     def _account_view(self) -> AccountState:
         st = self._account_state
@@ -543,6 +549,16 @@ class ExnessBroker:
         )
         self._awaiting_snapshot = False
         return snap
+
+    async def find_order(self, client_order_id: str, since: datetime) -> Order | None:
+        """Exness entities carry no client id, so only orders this adapter instance saw can be found.
+        After a restart this returns None; ``idempotent_submit`` makes resubmitting the same key safe."""
+        await self._refresh()
+        oid = next((o for o, tag in self._order_tag.items() if tag.client_order_id == client_order_id), None)
+        if oid is None:
+            return None
+        wire = self._orders.get(oid) or self._finished.get(oid)
+        return self._order_view(wire) if wire is not None else None
 
     async def limits(self) -> RateLimits:
         return self._limits.published()
@@ -1051,11 +1067,89 @@ class ExnessBroker:
                     self._on_rejected(pending, str(status.get("error_message") or state), self._now())
                 else:
                     _log.warning("exness_event_missed", operation_id=pending.op_id, key=key)
+                    with contextlib.suppress(BrokerError, KeyError, ValueError):
+                        await self._recover_operation(key, pending, status)
                     self._spawn(self.drop_connection())
             # forget finished requests after a while (keep keys long enough to answer duplicate submits)
             cutoff = time.monotonic() - 3600
             for key in [k for k, p in self._pending.items() if p.done and p.sent_mono < cutoff]:
                 self._pending.pop(key, None)
+
+    async def _recover_operation(self, key: str, pending: _Pending, status: Json) -> None:
+        """A confirmed operation whose transaction_event we never saw, e.g. a resend after a restart that the
+        server de-duplicated. Entities carry no client id, so re-link it by content within the operation's
+        lifetime: a market open via its ``open`` deal (closing orders look identical in order history), a
+        pending order via the snapshot (still working) or order history (filled/cancelled). Exactly one
+        untagged match is required; anything else is left alone and the OMS treats the order as not found."""
+        req = pending.request
+        rest = self._rest
+        info = self._symbols.get(req.symbol) if req is not None else None
+        if req is None or info is None or rest is None or pending.kind not in _OPEN_KINDS:
+            return
+        since = mp.parse_time(str(status["created_at"])) - timedelta(seconds=10)
+        side = mp.side_to_wire(req.side)
+
+        def same(o: Json) -> bool:
+            return (
+                o.get("instrument") == info.instrument.broker_symbol
+                and o.get("direction") == side
+                and o.get("volume") is not None
+                and mp.dec(o["volume"]) == req.volume
+                and str(o.get("order_id")) not in self._order_tag
+            )
+
+        history = await self._history(rest, "orders", since, info.instrument.broker_symbol)
+        if pending.kind == "open":
+            deals = await self._history(rest, "deals", since, info.instrument.broker_symbol, deal_type="open")
+            opened = {str(d["order_id"]) for d in deals if d.get("order_id") and same(d)}
+            matches = [o for o in history if o.get("order_type") == "market" and str(o["order_id"]) in opened]
+        else:
+            await self._refresh()
+            wanted = req.order_type.value.lower()
+            price = req.limit_price if req.order_type is OrderType.LIMIT else req.stop_price
+            matches = [
+                o
+                for o in [*self._orders.values(), *history]
+                if o.get("order_type") == wanted
+                and same(o)
+                and (price is None or (o.get("price") is not None and mp.dec(o["price"]) == price))
+            ]
+        if len(matches) != 1:
+            _log.warning("exness_recover_ambiguous", key=key, matches=len(matches))
+            return
+        order = matches[0]
+        oid = str(order["order_id"])
+        tag = self._tags.get(key) or Tag(key, req.strategy_id, req.strategy_version)
+        self._order_tag[oid] = tag
+        if order.get("state") not in ("placed", "pending_new"):
+            self._finished[oid] = order
+        if order.get("position_id"):
+            self._pos_strategy.setdefault(str(order["position_id"]), tag.strategy_id)
+        _log.info("exness_operation_recovered", key=key, order_id=oid)
+
+    async def _history(
+        self, rest: RestClient, kind: str, since: datetime, instrument: str, **filters: str
+    ) -> list[Json]:
+        """``GET /v1/history/accounts/{id}/{orders|deals}`` from ``since`` to now, following cursors (a cursor
+        cannot be combined with filters, only ``limit``). Returns the bare order/deal objects."""
+        op = "getOrdersHistory" if kind == "orders" else "getDealsHistory"
+        path = f"/v1/history/accounts/{self._acct()}/{kind}"
+        item_key = kind[:-1]
+        params: list[tuple[str, str]] = [
+            ("from", mp.iso(since)),
+            ("instrument", instrument),
+            ("limit", "200"),
+            *filters.items(),
+        ]
+        out: list[Json] = []
+        for _ in range(10):  # 2000 records in a ~minute window is far beyond one account's activity
+            res = await rest.get(op, path, params)
+            out.extend(i[item_key] for i in res.get("items") or [] if isinstance(i.get(item_key), dict))
+            cursor = res.get("next_cursor")
+            if not res.get("has_more") or not cursor:
+                break
+            params = [("cursor", str(cursor)), ("limit", "200")]
+        return out
 
     def _spawn(self, coro: Coroutine[None, None, None]) -> None:
         task = asyncio.create_task(coro)

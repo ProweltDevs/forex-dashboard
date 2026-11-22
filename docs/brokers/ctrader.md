@@ -51,7 +51,9 @@ that settles it (`uv run pytest -m demo tests/contract/test_ctrader_probes.py -s
 | A | `AmendPositionSLTPReq` without `stopLoss`/`takeProfit` **clears** them (our `modify_position(sl=None)` relies on it). Probe: `test_probe_clear_sl_by_omission`. | — |
 | A | STOP_LIMIT is `stopPrice` + `slippageInPoints`, where 1 point = 10^-digits. Probe: `test_probe_stop_limit_round_trip`. | — |
 | A | Trendbar range per request: the docs mention per-period limits but give no numbers (only `INCORRECT_BOUNDARIES`). The adapter asks for ≤ 1000 bars per request and halves the window on that error. Probe: `test_probe_trendbar_range_limits`. | [symbol-data](https://help.ctrader.com/open-api/symbol-data/) |
-| A | The server does **not** deduplicate a repeated `clientOrderId` (it is a FIX-style tag, not an idempotency key). The adapter deduplicates locally (`client_order_id → orderId`, plus in-flight requests). Across restarts the OMS reconciles. | — |
+| A | The server does **not** deduplicate a repeated `clientOrderId` (it is a FIX-style tag, not an idempotency key). The adapter deduplicates locally (`client_order_id → orderId`, plus in-flight requests). Across restarts the OMS reconciles. `Capabilities.idempotent_submit = False`, so the OMS needs two "not found" lookups before it resends (ADR 0007). | — |
+| V | `ProtoOAOrderListReq(fromTimestamp, toTimestamp)` (Unix ms) returns the trader's orders "filtered by timestamp". `ProtoOAOrder` carries `clientOrderId` (≤ 50 chars), `utcLastUpdateTimestamp` and `positionId`. `ProtoOAOrderListRes.hasMore`: "the number of records by filter is larger than chunkSize, the response contains the number of records that is equal to chunkSize". It counts as a historical request (5 req/s). | proto, [messages](https://help.ctrader.com/open-api/messages/#protooaorderlistreq) |
+| A | Neither the chunk size, the sort order nor a cursor is documented. So `find_order` bisects a truncated window until each slice is complete (≤ 64 requests, else `BrokerUnavailable`, never a false "not found"). It also assumes filled orders keep their `clientOrderId` in this history. Probe: `test_probe_order_history_lookup_after_restart`. | — |
 
 ## Errors (mapped in `mapping.py`)
 
@@ -82,3 +84,5 @@ There is no requote code: market orders fill at market, or as `MARKET_RANGE` wit
 - SL/TP clearing semantics of `AmendPositionSLTPReq`.
 - Trendbar range limits per period; actual history depth per period (the capabilities currently assume 30 days).
 - Whether every execution event in response to a request carries its `clientMsgId`.
+- `ProtoOAOrderListRes` chunk size and ordering; whether filled market orders keep `clientOrderId` in the
+  history (`test_probe_order_history_lookup_after_restart`).

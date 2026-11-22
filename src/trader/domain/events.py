@@ -82,6 +82,20 @@ class FeedEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ReconcileEvent:
+    """A correction applied because local state disagreed with the broker (the broker wins).
+    ``before``/``after`` are short human-readable renderings for the audit trail."""
+
+    account_id: str
+    kind: str  # e.g. position_adopted, position_missing, order_resolved, order_adopted, order_resubmitted
+    entity_id: str
+    before: str | None
+    after: str | None
+    reason: str
+    ts: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RiskEvent:
     account_id: str
     decision: RiskDecision
@@ -109,6 +123,7 @@ type DomainEvent = (
     | AccountEvent
     | ConnectionEvent
     | FeedEvent
+    | ReconcileEvent
     | RiskEvent
     | StrategyEvent
 )

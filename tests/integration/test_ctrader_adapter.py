@@ -17,6 +17,7 @@ from pydantic import SecretStr
 
 from tests.contract.harness import EventRecorder
 from tests.integration.ctrader_fake import FakeCTraderServer
+from trader.brokers.base import RateLimit
 from trader.brokers.ctrader import CTraderBroker, CTraderSettings, TokenSet, TokenStore
 from trader.brokers.ctrader import transport as tp
 from trader.brokers.ctrader.oauth import authorize_url
@@ -423,3 +424,30 @@ async def test_token_refreshed_while_connected(server: FakeCTraderServer, tmp_pa
     assert saved is not None
     assert saved.refresh_token.get_secret_value() == server.refresh_token
     await broker.close()
+
+
+async def test_find_order_bisects_truncated_history(
+    connected: tuple[CTraderBroker, EventRecorder], server: FakeCTraderServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broker, rec = connected
+    since = datetime.now(UTC) - timedelta(seconds=1)
+    reqs = [market() for _ in range(3)]
+    for r in reqs:
+        await broker.place_order(r)
+        await rec.wait_for(FillEvent, lambda e, r=r: e.fill.client_order_id == r.client_order_id)
+        await asyncio.sleep(0.02)  # distinct update timestamps
+    server.history_chunk = 1  # every window holding more than one finished order is truncated
+    # Speed up the client-side historical throttle for this test only (the fake allows 50 req/s in all).
+    monkeypatch.setattr(tp, "_CLIENT_HISTORICAL", RateLimit(name="historical", rate_per_s=D(25), burst=5))
+    fresh = make_broker(server)  # no local client-id links: the lookup must come from history
+    await fresh.connect()
+    try:
+        before = server.history_requests
+        for r in (reqs[0], reqs[-1]):
+            found = await fresh.find_order(r.client_order_id, since)
+            assert found is not None
+            assert found.status.value == "FILLED"
+        assert server.history_requests - before > 2  # windows were split
+        assert server.rate_limited == 0
+    finally:
+        await fresh.close()

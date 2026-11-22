@@ -68,6 +68,10 @@ class FakeExness:
         self.bid, self.ask = D("1.10000"), D("1.10010")
         self.positions: dict[str, Json] = {}
         self.orders: dict[str, Json] = {}  # active limit/stop + sltp
+        self.history: list[
+            Json
+        ] = []  # closed orders (filled/cancelled/rejected), for GET /history/.../orders
+        self.deals: list[Json] = []  # for GET /history/.../deals
         self.operations: dict[str, Json] = {}
         self.idempotency: dict[tuple[str, str], tuple[str, str]] = {}  # (key, op) -> (body hash, op id)
         self.requests: list[str] = []  # "METHOD path" of every REST call (signature-verified)
@@ -196,6 +200,8 @@ class FakeExness:
             return self._json(200, self._snapshot())
         if method == "GET" and path.endswith("/candles"):
             return self._candles(q)
+        if method == "GET" and "/history/accounts/" in path:
+            return self._history(path.rsplit("/", 1)[-1], q)
         if method == "GET" and "/operations/" in path:
             op = self.operations.get(path.rsplit("/", 1)[-1])
             return self._json(200, op) if op else self._err(404, 3014, "REQUEST_OPERATION_NOT_FOUND")
@@ -291,10 +297,13 @@ class FakeExness:
         orders: list[Json] = [{"order_id": oid, "position_id": pid, "order_type": "market", "state": "filled",
                                "direction": req["side"], "instrument": "EURUSDm", "price": f"{price}",
                                "volume": req["volume"], "create_time": now}]  # fmt: skip
+        self.history.append(dict(orders[0]))
         if req.get("stop_loss_price") or req.get("take_profit_price"):
             orders.append(self._new_sltp(pid, req.get("stop_loss_price"), req.get("take_profit_price")))
-        deal = {"deal_id": did, "position_id": pid, "type": "open", "direction": req["side"], "instrument": "EURUSDm",
-                "volume": req["volume"], "price": f"{price}", "create_time": now, "commission": "-0.30"}  # fmt: skip
+        deal = {"deal_id": did, "order_id": oid, "position_id": pid, "type": "open", "direction": req["side"],
+                "instrument": "EURUSDm", "volume": req["volume"], "price": f"{price}", "create_time": now,
+                "commission": "-0.30"}  # fmt: skip
+        self.deals.append(dict(deal))
         return {"orders": orders, "positions": [pos], "deals": [deal], "account_state": self._account_state()}
 
     def _new_sltp(self, pid: str, sl: str | None, tp: str | None) -> Json:
@@ -338,6 +347,7 @@ class FakeExness:
     def _cancel(self, oid: str) -> Json:
         o = self.orders.pop(oid)
         o.update(state="cancelled", update_time=_now_iso())
+        self.history.append(dict(o))
         return {"orders": [o], "account_state": self._account_state()}
 
     def _close(self, pid: str, volume: str | None) -> Json | tuple[int, str]:
@@ -365,6 +375,8 @@ class FakeExness:
         deal = {"deal_id": did, "order_id": oid, "position_id": pid, "type": "close", "direction": side,
                 "instrument": "EURUSDm", "volume": f"{vol}", "price": f"{price}", "create_time": now,
                 "commission": "-0.30", "profit": {"amount": f"{profit}", "currency": "USD"}}  # fmt: skip
+        self.history.append(dict(order))
+        self.deals.append(dict(deal))
         return {
             "orders": [order],
             "positions": [pos],
@@ -373,6 +385,23 @@ class FakeExness:
         }
 
     # ------------------------------------------------------------------ reads
+
+    def _history(self, kind: str, q: dict[str, str]) -> httpx.Response:
+        """Closed orders / deals by create_time in [from, to), one page (enough for tests)."""
+        if "from" not in q:
+            return self._err(400, 3001, "REQUEST_INVALID_PARAMETERS")
+        lo = datetime.fromisoformat(q["from"].replace("Z", "+00:00"))
+        hi = datetime.fromisoformat(q["to"].replace("Z", "+00:00")) if "to" in q else datetime.now(UTC)
+        rows = self.history if kind == "orders" else self.deals
+        item = "order" if kind == "orders" else "deal"
+        items = [
+            {"event_time": r["create_time"], item: r}
+            for r in rows
+            if lo <= datetime.fromisoformat(r["create_time"]) < hi
+            and r.get("instrument") == q.get("instrument", r.get("instrument"))
+            and r.get("type") == q.get("deal_type", r.get("type"))
+        ]
+        return self._json(200, {"items": items, "has_more": False})
 
     def _snapshot(self) -> Json:
         return {"orders": list(self.orders.values()), "positions": list(self.positions.values()),

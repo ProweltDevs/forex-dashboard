@@ -399,3 +399,70 @@ def test_registry_builds_exness(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="gateway_url"):
         AccountConfig.model_validate({**base, "exness": {"gateway_url": "http://insecure.example"}})
+
+
+async def _watchdog_resubscribed(rec: EventRecorder, mark: int) -> None:
+    """No transaction_event follows a de-duplicated resend: the watchdog polls the operation, tries to
+    re-link it, then drops and re-establishes the stream."""
+    down = await rec.wait_for(
+        ConnectionEvent, lambda e: e.state is ConnectionState.DOWN, after=mark, timeout=10
+    )
+    await rec.wait_for(
+        ConnectionEvent, lambda e: e.state is ConnectionState.UP, after=rec.events.index(down), timeout=10
+    )
+
+
+async def _fresh(fake: FakeExness) -> tuple[ExnessBroker, EventRecorder]:
+    broker = ExnessBroker(settings(fake), clock=SystemClock(), http_transport=fake.transport)
+    await broker.connect()
+    rec = EventRecorder(broker)
+    await broker.snapshot()
+    return broker, rec
+
+
+async def test_restarted_adapter_relinks_a_deduplicated_pending_order(fake: FakeExness) -> None:
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    r = req(order_type=OrderType.LIMIT, limit_price=D("1.09000"))
+    first, rec = await _fresh(fake)
+    await first.place_order(r)
+    placed = await rec.wait_for(OrderEvent, lambda e: e.order.status is OrderStatus.WORKING)
+    await rec.stop()
+    await first.close()
+
+    broker, rec = await _fresh(fake)  # a new process: no client-id links
+    try:
+        assert await broker.find_order(r.client_order_id, since) is None
+        mark = rec.mark
+        await broker.place_order(r)  # same key: the server returns the original operation
+        await _watchdog_resubscribed(rec, mark)
+        found = await broker.find_order(r.client_order_id, since)
+        assert found is not None
+        assert found.status is OrderStatus.WORKING
+        assert found.broker_order_id == placed.order.broker_order_id
+        assert len(fake.orders) == 1
+    finally:
+        await rec.stop()
+        await broker.close()
+
+
+async def test_restarted_adapter_refuses_an_ambiguous_relink(fake: FakeExness) -> None:
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    first, rec = await _fresh(fake)
+    r1, r2 = req(volume="0.02"), req(volume="0.02")  # identical content, different keys
+    for r in (r1, r2):
+        await first.place_order(r)
+        await rec.wait_for(FillEvent, lambda e, r=r: e.fill.client_order_id == r.client_order_id)
+    await rec.stop()
+    await first.close()
+
+    broker, rec = await _fresh(fake)
+    try:
+        mark = rec.mark
+        await broker.place_order(r1)
+        await _watchdog_resubscribed(rec, mark)
+        # Two open deals match: linking either could attribute the wrong one, so neither is linked.
+        assert await broker.find_order(r1.client_order_id, since) is None
+        assert len(fake.positions) == 2
+    finally:
+        await rec.stop()
+        await broker.close()

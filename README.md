@@ -48,3 +48,12 @@ Ticks feed a non-blocking bus, bar builder and stale-feed monitor, and are recor
 `data/ticks/{broker}/{symbol}/{yyyy-mm-dd}.parquet` (the future backtest dataset). See
 [ADR 0006](docs/adr/0006-market-data.md). `uv run pytest -m demo tests/contract/test_bars_vs_broker.py -s`
 compares bars built from live ticks with the broker's candles.
+
+## Orders (OMS)
+
+Every order goes `Strategy → OrderIntent → risk gate → OrderManager → Broker`. One writer task per account
+owns order state. PENDING_SUBMIT is persisted before sending, so a crash mid-order is resolved on restart:
+the order is found at the broker, or resent once with the same id while the signal is fresh. Reconcile runs
+before trading resumes. Missing broker features (expiry, SL/TP, stop-limit, trailing, break-even, time
+exits, scale-outs, OCO) are emulated. See [ADR 0007](docs/adr/0007-oms.md). Until phase 6 the risk gate is
+`ApproveAll` (tests/paper only).

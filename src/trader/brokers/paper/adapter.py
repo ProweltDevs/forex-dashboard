@@ -111,6 +111,7 @@ class PaperBroker:
             candle_history={tf: timedelta(days=30) for tf in Timeframe if tf.duration is not None},
             max_candles_per_request=1000,
             sync_order_result=False,
+            idempotent_submit=True,
         )
         self._bucket = TokenBucket(settings.rate_limit) if settings.rate_limit else None
 
@@ -197,8 +198,19 @@ class PaperBroker:
         if self._events_consumed:
             raise RuntimeError("events() supports a single consumer (the account's OMS)")
         self._events_consumed = True
-        while (event := await self._events.get()) is not None:
-            yield event
+        try:
+            while (event := await self._events.get()) is not None:
+                yield event
+        finally:
+            self._events_consumed = False  # a restarted process may attach again
+
+    def discard_events(self) -> int:
+        """Test hook: drop events nobody consumed (they died with the connection). Returns how many."""
+        n = 0
+        while not self._events.empty():
+            self._events.get_nowait()
+            n += 1
+        return n
 
     # ------------------------------------------------------------------ queries
 
@@ -228,6 +240,11 @@ class PaperBroker:
         )
         self._awaiting_snapshot = False
         return snap
+
+    async def find_order(self, client_order_id: str, since: datetime) -> Order | None:
+        self._request()
+        broker_id = self._by_client_id.get(client_order_id)
+        return self._orders.get(broker_id) if broker_id is not None else None
 
     async def limits(self) -> RateLimits:
         limit = self._settings.rate_limit
