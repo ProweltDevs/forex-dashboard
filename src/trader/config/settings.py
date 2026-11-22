@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
 
@@ -33,15 +34,26 @@ class DatabaseConfig(_Model):
     pool_size: int = Field(default=5, ge=1, le=50)
 
 
-class PaperConfig(_Model):
-    """Fill simulation for the paper broker."""
+class PaperRateLimitConfig(_Model):
+    rate_per_s: Decimal = Field(gt=0)
+    burst: int = Field(ge=1)
 
-    starting_balance: str = "10000"
-    currency: str = "USD"
+
+class PaperConfig(_Model):
+    """Fill simulation for the paper broker (see ``trader.brokers.paper.PaperSettings``)."""
+
+    starting_balance: Decimal = Field(default=Decimal(10_000), ge=0)
+    currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
     leverage: int = Field(default=100, ge=1, le=3000)
+    hedging: bool = True
     slippage_points: int = Field(default=0, ge=0)
+    extra_spread_points: int = Field(default=0, ge=0)
     latency_ms: int = Field(default=0, ge=0)
-    commission_per_lot: str = "0"
+    commission_per_lot: Decimal = Field(default=Decimal(0), ge=0)
+    swap_long_per_lot: Decimal = Decimal(0)
+    swap_short_per_lot: Decimal = Decimal(0)
+    rollover_hour_utc: int = Field(default=21, ge=0, le=23)
+    rate_limit: PaperRateLimitConfig | None = None
     market_data_from: str | None = None  # id of another account to source live ticks from
 
 

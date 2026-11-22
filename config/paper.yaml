@@ -12,7 +12,13 @@ accounts:
       starting_balance: "10000"
       currency: USD
       leverage: 100
-      slippage_points: 0
-      latency_ms: 0
-      commission_per_lot: "0"
+      hedging: true              # false = netting (one position per symbol)
+      slippage_points: 0         # adverse ticks on market/stop fills
+      extra_spread_points: 0     # widen the source spread (ticks)
+      latency_ms: 0              # ACK -> execution delay
+      commission_per_lot: "0"    # account currency, per side
+      swap_long_per_lot: "0"     # account currency per lot per night
+      swap_short_per_lot: "0"
+      rollover_hour_utc: 21
+      # rate_limit: {rate_per_s: 50, burst: 50}   # emulate broker-side request limits
       # market_data_from: ctrader-demo   # uncomment to drive paper fills from a real demo feed

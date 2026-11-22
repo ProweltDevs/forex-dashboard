@@ -85,3 +85,19 @@ class UnknownOrderState(BrokerError):
 
 class OrderRejected(BrokerError):
     """The broker rejected the order for a reason with no more specific mapping."""
+
+
+class UnknownSymbol(BrokerError):
+    """The symbol is not tradable on this account (not in the instrument list)."""
+
+
+class OrderNotFound(BrokerError):
+    """No open order with this ID (already filled, cancelled or never existed)."""
+
+
+class PositionNotFound(BrokerError):
+    """No open position with this ID."""
+
+
+class ConversionUnavailable(TraderError):
+    """No live tick is available to convert between two currencies."""
