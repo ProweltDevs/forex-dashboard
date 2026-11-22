@@ -240,3 +240,39 @@ async def test_requests_fail_cleanly_while_disconnected(harness: ContractHarness
     await harness.reconnect()
     await harness.broker.snapshot()
     assert await harness.broker.account()
+
+
+async def test_find_order_by_client_order_id(harness: ContractHarness) -> None:
+    """Targeted reconcile: the broker's view of an order we sent, by client_order_id."""
+    from datetime import UTC, datetime, timedelta
+
+    broker = harness.broker
+    since = datetime.now(UTC) - timedelta(minutes=5)
+    inst = await harness.instrument()
+    req = harness.request(Side.BUY, inst.min_volume)
+    await broker.place_order(req)
+    await harness.fill_for(req.client_order_id)
+    found = await broker.find_order(req.client_order_id, since)
+    assert found is not None
+    assert found.client_order_id == req.client_order_id
+    assert found.status is OrderStatus.FILLED
+
+    tick = await harness.last_tick()
+    pending = harness.request(
+        Side.BUY,
+        inst.min_volume,
+        order_type=OrderType.LIMIT,
+        limit_price=inst.round_price(tick.bid * Decimal("0.95")),
+    )
+    await broker.place_order(pending)
+    await harness.recorder.wait_for(
+        OrderEvent,
+        lambda e: (
+            e.order.client_order_id == pending.client_order_id and e.order.status is OrderStatus.WORKING
+        ),
+    )
+    open_view = await broker.find_order(pending.client_order_id, since)
+    assert open_view is not None
+    assert open_view.status is OrderStatus.WORKING
+    assert await broker.find_order("01NEVERSENTNEVERSENTNEVER0", since) is None
+    assert isinstance(broker.capabilities.idempotent_submit, bool)

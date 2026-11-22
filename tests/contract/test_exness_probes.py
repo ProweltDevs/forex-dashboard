@@ -90,3 +90,45 @@ async def test_probe_close_deal_fields(demo: ContractHarness) -> None:
         f"\n[probe] close deal: profit={close.fill.realized_pnl} "
         f"commission={close.fill.commission} swap={close.fill.swap}"
     )
+
+
+async def test_probe_restart_relink_from_history(demo: ContractHarness) -> None:
+    """After a restart a new adapter has no client-id links. Resending the same request must be
+    de-duplicated by the server, and the watchdog must re-link the order from deal/order history
+    (relies on open deals carrying ``order_id``, and the market order appearing in order history)."""
+    from datetime import UTC, datetime, timedelta
+
+    from trader.domain import ConnectionEvent, ConnectionState
+
+    inst = await demo.instrument()
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    req = demo.request(Side.BUY, inst.min_volume)
+    await demo.broker.place_order(req)
+    fill = (await demo.fill_for(req.client_order_id)).fill  # demo.cleanup closes this position
+    restarted = await exness_demo_harness()
+    try:
+        before = await restarted.broker.find_order(req.client_order_id, since)
+        mark = restarted.recorder.mark
+        ack = await restarted.broker.place_order(req)  # same key and payload
+        down = await restarted.recorder.wait_for(
+            ConnectionEvent, lambda e: e.state is ConnectionState.DOWN, after=mark, timeout=30
+        )
+        await restarted.recorder.wait_for(
+            ConnectionEvent,
+            lambda e: e.state is ConnectionState.UP,
+            after=restarted.recorder.events.index(down),
+            timeout=30,
+        )
+        found = await restarted.broker.find_order(req.client_order_id, since)
+        positions = [p for p in await restarted.broker.positions() if p.position_id == fill.position_id]
+        print(
+            f"\n[probe] before relink: {before}; resend ack={ack}\n"
+            f"[probe] after relink: status={found.status if found else None} "
+            f"order_id={found.broker_order_id if found else None} (fill order {fill.broker_order_id}); "
+            f"position strategy={positions[0].strategy_id if positions else None}"
+        )
+        assert before is None
+        assert found is not None, "could not re-link the order from history"
+        assert found.broker_order_id == fill.broker_order_id
+    finally:
+        await restarted.cleanup()

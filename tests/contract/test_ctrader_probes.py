@@ -96,3 +96,28 @@ async def test_probe_stop_limit_round_trip(demo: ContractHarness) -> None:
     )
     assert ack.broker_order_id
     await demo.broker.cancel_order(ack.broker_order_id)
+
+
+async def test_probe_order_history_lookup_after_restart(demo: ContractHarness) -> None:
+    """A new adapter instance (no local links) must find a filled market order by clientOrderId through
+    ProtoOAOrderListReq. The OMS resends on a miss and cTrader does not de-duplicate, so a miss here
+    means a double order after a restart."""
+    from datetime import UTC, datetime, timedelta
+
+    inst = await demo.instrument()
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    req = demo.request(Side.BUY, inst.min_volume)
+    await demo.broker.place_order(req)
+    fill = (await demo.fill_for(req.client_order_id)).fill  # demo.cleanup closes this position
+    restarted = await ctrader_demo_harness()
+    try:
+        found = await restarted.broker.find_order(req.client_order_id, since)
+        print(
+            f"\n[probe] history lookup: status={found.status if found else None} "
+            f"order_id={found.broker_order_id if found else None} (fill order {fill.broker_order_id}) "
+            f"strategy={found.request.strategy_id if found else None}"
+        )
+        assert found is not None, "filled order not found in ProtoOAOrderListRes by clientOrderId"
+        assert found.broker_order_id == fill.broker_order_id
+    finally:
+        await restarted.cleanup()

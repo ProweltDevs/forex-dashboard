@@ -54,6 +54,9 @@ class FakeCTraderServer:
         self.positions: dict[int, model.ProtoOAPosition] = {}
         self.orders: dict[int, model.ProtoOAOrder] = {}
         self.client_ids: dict[str, int] = {}
+        self.history: list[model.ProtoOAOrder] = []  # finished orders, for ProtoOAOrderListReq
+        self.history_chunk = 1000  # records per ProtoOAOrderListRes before hasMore
+        self.history_requests = 0
         self.received: list[str] = []
         self.refreshes = 0
         self.rate_limited = 0
@@ -266,6 +269,12 @@ class FakeCTraderServer:
                     positionId=pos.positionId, grossUnrealizedPnL=pnl, netUnrealizedPnL=pnl
                 )
             self._send(conn, res, mid)
+        elif isinstance(m, msgs.ProtoOAOrderListReq):
+            self.history_requests += 1
+            found = [o for o in self.history if m.fromTimestamp <= o.utcLastUpdateTimestamp <= m.toTimestamp]
+            res = msgs.ProtoOAOrderListRes(ctidTraderAccountId=ctid, hasMore=len(found) > self.history_chunk)
+            res.order.extend(found[: self.history_chunk])
+            self._send(conn, res, mid)
         elif isinstance(m, msgs.ProtoOAGetTrendbarsReq):
             self._trendbars(conn, m, mid)
         elif isinstance(m, msgs.ProtoOANewOrderReq):
@@ -301,6 +310,7 @@ class FakeCTraderServer:
                 )
                 return
             order.orderStatus = model.ORDER_STATUS_CANCELLED
+            self.history.append(order)
             self._send(conn, self._exec(model.ORDER_CANCELLED, order=order), mid)
         elif isinstance(m, msgs.ProtoOAAmendPositionSLTPReq):
             pos = self.positions.get(m.positionId)
@@ -395,6 +405,7 @@ class FakeCTraderServer:
             filledVolume=m.volume, symbolId=m.symbolId, createTimestamp=now, executionTimestamp=now,
             executionPrice=price, tradeSide=m.tradeSide, dealStatus=model.FILLED, commission=-30, moneyDigits=2,
         )  # fmt: skip
+        self.history.append(order)
         self._send(conn, self._exec(model.ORDER_FILLED, order=order, position=pos, deal=deal))
 
     def _close(self, conn: _Conn, m: msgs.ProtoOAClosePositionReq, mid: str | None) -> None:

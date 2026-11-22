@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from .enums import OrderStatus, OrderType, Side, Timeframe, TimeInForce
 from .errors import InvalidPrice, InvalidVolume
+from .exits import ExitSpec
 from .money import (
     ZERO,
     floor_to_step,
@@ -231,6 +232,8 @@ class OrderIntent:
     max_slippage: Decimal | None = None  # in price units
     signal_price: Decimal | None = None
     tags: tuple[str, ...] = ()
+    exits: tuple[ExitSpec, ...] = ()  # emulated by the OMS after the fill (trailing, break-even, ...)
+    oco_group: str | None = None  # orders sharing a group: the first fill cancels the others
 
     def __post_init__(self) -> None:
         _validate_order_fields(
@@ -268,6 +271,8 @@ class OrderIntent:
             signal_ts=self.signal_ts,
             signal_price=self.signal_price,
             tags=self.tags,
+            exits=self.exits,
+            oco_group=self.oco_group,
         )
 
 
@@ -292,6 +297,8 @@ class OrderRequest:
     signal_ts: datetime | None = None
     signal_price: Decimal | None = None
     tags: tuple[str, ...] = ()
+    exits: tuple[ExitSpec, ...] = ()  # handled by the OMS, never sent to the broker
+    oco_group: str | None = None
 
     def __post_init__(self) -> None:
         if not 5 <= len(self.client_order_id) <= 128:

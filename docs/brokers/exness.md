@@ -43,6 +43,9 @@ guides under <https://www.exness-api.com/trading/>, read on 2026-11-22. The chan
 | V | Volumes are **lots** as decimal strings (`volume_min`/`max`/`step` from instrument conditions; `contract_size` e.g. `100000`). Request prices allow at most `point_digits` decimals. Trading prices and money are decimal strings; ticks and candles are JSON numbers. | spec `info`, `InstrumentConditionResponse` |
 | V | Positions carry no SL/TP: they are on a linked `sltp` order. In the snapshot a pending order's own SL/TP sits on the order. | spec `WSTradingTransactionEvent`, `Order` |
 | V | Deals: types `open`/`close`/balance types; `profit {amount, currency}`, `commission`. There is no swap field on deals (positions carry accumulated `swap`). | spec `Deal`, `Position` |
+| V | **History:** `GET /v1/history/accounts/{id}/orders` (closed orders only: `filled`/`cancelled`/`rejected`; open and placed orders come from the snapshot) and `…/deals` (`deal_type` filter: `open`, `close`, balance types). Query `from` (inclusive, required without `cursor`), `to` (exclusive, optional), `limit` 1–200 (default 100), `instrument`; `order_state` for orders. A `cursor` cannot be combined with filters other than `limit`. Response `{items: [{event_time, order|deal}], next_cursor, has_more, range}`, ascending by `event_time`. Window and age limits come from `…/limits`. | spec `getOrdersHistory`, `getDealsHistory` |
+| V | `Order` has no field that tells an opening market order from a closing one; `Deal.type` (`open`/`close`) and `Deal.order_id` ("if the deal was created as a result of an order execution") do. | spec `Order`, `Deal` |
+| A | **Restart re-link** (`ExnessBroker._recover_operation`, ADR 0007): a confirmed operation without a `transaction_event` (a resend de-duplicated after a restart) is linked to the single untagged match on instrument, side and volume since the operation was created. A market open is matched through its `open` deal's `order_id`; a pending order through the snapshot or order history (same type and price). This relies on open deals carrying `order_id`. Probe: `test_probe_restart_relink_from_history`. | — |
 | A | Commission is reported as a negative number (debit), as in the spec examples. Probe: `test_probe_close_deal_fields`. | — |
 | A | Accounts are **hedging** (opposite positions coexist). Probe: `test_probe_sltp_visibility_and_hedging`. | — |
 | A | The REST snapshot lists positions' active `sltp` orders, so SL/TP show after reconnect. Same probe. | — |
@@ -87,5 +90,6 @@ The troubleshooting page also lists `AUTH_RATE_LIMIT` (1003), which is missing f
 ## Open questions (settle with the probes, then update this page)
 
 - WebSocket URL scheme and subprotocol; tick `timestamp` format.
-- Whether the REST snapshot includes positions' `sltp` orders; whether open deals carry `order_id`.
+- Whether the REST snapshot includes positions' `sltp` orders; whether open deals carry `order_id` (the
+  restart re-link depends on it: `test_probe_restart_relink_from_history`).
 - Commission sign; hedging; comment length limit; instrument naming per account type.
