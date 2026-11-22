@@ -96,6 +96,22 @@ class Instrument:
         if price <= 0 or not is_multiple_of(price, self.tick_size):
             raise InvalidPrice(f"{self.symbol}: {price} is not on the tick grid {self.tick_size}")
 
+    def is_open(self, ts: datetime) -> bool:
+        """True if ``ts`` falls inside a trading session (no sessions configured = always open)."""
+        if not self.sessions:
+            return True
+        ts = ensure_utc(ts)
+        now, weekday = ts.time(), ts.weekday()
+        for s in self.sessions:
+            if s.start < s.end:
+                if s.weekday == weekday and s.start <= now < s.end:
+                    return True
+            elif (s.weekday == weekday and now >= s.start) or (
+                (s.weekday + 1) % 7 == weekday and now < s.end
+            ):
+                return True  # window crosses midnight
+        return False
+
     def lots_to_units(self, lots: Decimal) -> Decimal:
         return lots * self.contract_size
 
