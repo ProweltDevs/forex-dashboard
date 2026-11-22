@@ -1,0 +1,18 @@
+# Broker DEMO accounts. Secrets come from .env via secrets_ref (see .env.example).
+mode: demo
+logging:
+  level: INFO
+  json: true
+accounts:
+  - id: ctrader-demo
+    broker: ctrader
+    environment: demo
+    account_id: "0000000"          # cTrader ctidTraderAccountId
+    secrets_ref: CTRADER_DEMO
+    symbols: [EURUSD, GBPUSD, XAUUSD]
+  - id: exness-demo
+    broker: exness
+    environment: demo
+    account_id: "0000000"
+    secrets_ref: EXNESS_DEMO
+    symbols: [EURUSD, XAUUSD]

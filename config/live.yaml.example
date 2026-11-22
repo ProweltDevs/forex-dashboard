@@ -1,0 +1,13 @@
+# LIVE trading — real money. Copy to config/live.yaml (gitignored).
+# Starts only with:  TRADER_MODE=live uv run trader run --config config/live.yaml --confirm-live
+mode: live
+logging:
+  level: INFO
+  json: true
+accounts:
+  - id: ctrader-live
+    broker: ctrader
+    environment: live
+    account_id: "0000000"
+    secrets_ref: CTRADER_LIVE
+    symbols: [EURUSD]
