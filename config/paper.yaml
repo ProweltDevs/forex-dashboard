@@ -29,8 +29,36 @@ accounts:
       swap_long_per_lot: "0"     # account currency per lot per night
       swap_short_per_lot: "0"
       rollover_hour_utc: 21
+      # rate_limit: {rate_per_s: 50, burst: 50}   # emulate broker-side request limits
+      # Prices: a seeded random walk so paper mode runs without broker credentials. It is NOT market data:
+      # use it to exercise the platform, never to judge a strategy. For real prices, remove synthetic_feed and
+      # set market_data_from to a demo account defined in this file (it is then used for prices only).
+      synthetic_feed: {seed: 1, tick_interval_ms: 250}
+      # market_data_from: ctrader-demo
     risk:                          # built-in defaults; every field is listed in config/live.yaml.example
       limits: {}
       strategies: {}               # per-strategy overrides
-      # rate_limit: {rate_per_s: 50, burst: 50}   # emulate broker-side request limits
-      # market_data_from: ctrader-demo   # uncomment to drive paper fills from a real demo feed
+
+# Strategy instances (SPEC §8). class: a built-in (ema_cross, donchian_breakout, rsi_reversion) or
+# "package.module:ClassName". params are validated by the strategy's Params model. Timeframes must be
+# listed in market_data.timeframes. With the synthetic feed there is no candle history, so strategies warm
+# up from live bars (e.g. EMA 26 on M5 trades after about two hours).
+strategies:
+  - id: ema-cross-eurusd-m5
+    class: ema_cross
+    account: paper-main
+    symbols: [EURUSD]
+    timeframes: [M5]
+    params: {fast: 12, slow: 26, atr_period: 14, atr_stop: "2", atr_target: "3", risk_pct: "0.5"}
+  - id: donchian-gbpusd-m15
+    class: donchian_breakout
+    account: paper-main
+    symbols: [GBPUSD]
+    timeframes: [M15]
+    params: {period: 20, atr_period: 14, exit_after_bars: 16, risk_pct: "0.5"}
+  - id: rsi-xauusd-m5
+    class: rsi_reversion
+    account: paper-main
+    symbols: [XAUUSD]
+    timeframes: [M5]
+    params: {rsi_period: 14, oversold: "30", overbought: "70", risk_pct: "0.25"}

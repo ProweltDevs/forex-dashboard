@@ -9,12 +9,12 @@ processed fill ids and emulations.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from trader.domain.jsontypes import JsonObj, JsonValue
+from trader.persistence.files import read_text, write_atomic
 
 SCHEMA = "oms/1"
 
@@ -93,16 +93,8 @@ class JsonFileStore:
         self.path = path
 
     def load(self) -> OmsState | None:
-        if not self.path.exists():
-            return None
-        return OmsState.from_json(json.loads(self.path.read_text(encoding="utf-8")))
+        raw = read_text(self.path)
+        return None if raw is None else OmsState.from_json(json.loads(raw))
 
     def save(self, state: OmsState) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f".{self.path.name}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state.to_json(), fh, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, self.path)
+        write_atomic(self.path, json.dumps(state.to_json(), separators=(",", ":")))

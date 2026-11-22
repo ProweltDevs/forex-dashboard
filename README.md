@@ -88,3 +88,31 @@ uv run trader kill --config config/demo.yaml --account ctrader-demo --reset --re
 
 Live accounts also need `TRADER_MODE=live` and `--confirm-live`. Acceptance on demo:
 `uv run pytest -m demo tests/contract/test_kill_switch_demo.py -s` (the demo account must start flat).
+
+## Strategies and `trader run`
+
+Strategies subclass `trader.strategy.Strategy`. They are synchronous and deterministic, and they act only
+through their context: `ctx.buy/sell/place` return intents that the runner sends through risk and the OMS.
+Indicators update incrementally. A failing callback is rolled back, and repeated failures pause only that
+strategy. `ctx.state` is persisted. Instances are configured under `strategies:` in the config. Three
+examples ship in `strategy/examples/`: `ema_cross`, `donchian_breakout` and `rsi_reversion`. See
+[ADR 0009](docs/adr/0009-strategy-framework.md).
+
+Run the whole platform. The paper config uses a seeded random walk, so it needs no credentials; those
+prices are not market data:
+
+```bash
+uv run trader run --config config/paper.yaml --duration 24h
+```
+
+With the demo accounts in `.env`:
+
+```bash
+uv run trader run --config config/demo.yaml --duration 24h
+```
+
+Ctrl-C (or SIGTERM) shuts down gracefully: strategies pause, in-flight orders settle, then state is
+persisted. Each run prints a summary and writes `data/reports/run-<ts>.json`. It exits non-zero if any
+strategy raised an error. To trade paper on real prices, set `paper.market_data_from` to a demo account
+in the same config; that account is used for prices only.
+
