@@ -147,7 +147,7 @@ class Recorder:
         self._task.cancel()
 
 
-class RejectAbove:
+class RejectAbove(ApproveAll):
     """Tiny risk gate for tests: rejects volumes above ``limit``."""
 
     def __init__(self, limit: Decimal) -> None:

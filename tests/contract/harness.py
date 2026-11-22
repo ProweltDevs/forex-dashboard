@@ -24,7 +24,9 @@ from trader.brokers.base import Broker, RateLimit
 from trader.brokers.ctrader import CTraderBroker, CTraderSettings, TokenSet, TokenStore
 from trader.brokers.exness import ExnessBroker, ExnessSettings
 from trader.brokers.paper import FakeTickSource, PaperBroker, PaperSettings
+from trader.brokers.registry import BrokerDeps, default_registry
 from trader.config.secrets import read_env_file
+from trader.config.settings import AccountConfig
 from trader.domain import ConnectionEvent, ConnectionState, Instrument, OrderType, Side, Tick, TickEvent
 from trader.domain.events import DomainEvent, FillEvent
 from trader.domain.ids import new_client_order_id
@@ -288,27 +290,29 @@ def demo_env() -> dict[str, str]:
     return {**read_env_file(DEMO_ENV_FILE), **os.environ}
 
 
-async def ctrader_demo_harness() -> ContractHarness:
-    """DEMO ONLY. Uses CTRADER_DEMO_* credentials from the environment or .env."""
-    env = demo_env()
+def ctrader_demo_account(env: dict[str, str]) -> AccountConfig:
+    """DEMO ONLY. The account config for CTRADER_DEMO_* credentials; skips the test when they are missing."""
     missing = [k for k in CTRADER_DEMO_REQUIRED if not env.get(k)]
     if missing:
         pytest.skip(f"cTrader demo credentials missing: {', '.join(missing)}")
-    from trader.brokers.registry import BrokerDeps, default_registry
-    from trader.config.settings import AccountConfig
-
-    symbol = env.get("CTRADER_DEMO_SYMBOL", "EURUSD")
-    account = AccountConfig.model_validate(
+    return AccountConfig.model_validate(
         {
             "id": "contract-ctrader-demo",
             "broker": "ctrader",
             "environment": "demo",  # never live
             "account_id": env["CTRADER_DEMO_ACCOUNT_ID"],
             "secrets_ref": "CTRADER_DEMO",
-            "symbols": [symbol],
+            "symbols": [env.get("CTRADER_DEMO_SYMBOL", "EURUSD")],
             "ctrader": {"proxy": env.get("CTRADER_PROXY") or None},
         }
     )
+
+
+async def ctrader_demo_harness() -> ContractHarness:
+    """DEMO ONLY. Uses CTRADER_DEMO_* credentials from the environment or .env."""
+    env = demo_env()
+    account = ctrader_demo_account(env)
+    symbol = account.symbols[0]
     broker = default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
     assert isinstance(broker, CTraderBroker)
 
@@ -389,10 +393,9 @@ EXNESS_DEMO_REQUIRED = (
 )
 
 
-async def exness_demo_harness() -> ContractHarness:
-    """DEMO ONLY. Exness does not separate demo and real accounts by host, so the tests refuse to run
-    unless EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes declares that EXNESS_DEMO_ACCOUNT_ID is a demo account."""
-    env = demo_env()
+def exness_demo_account(env: dict[str, str]) -> AccountConfig:
+    """DEMO ONLY. Exness does not separate demo and real accounts by host, so this skips unless
+    EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes declares that EXNESS_DEMO_ACCOUNT_ID is a demo account."""
     missing = [k for k in EXNESS_DEMO_REQUIRED if not env.get(k)]
     if not env.get("EXNESS_DEMO_PRIVATE_KEY") and not env.get("EXNESS_DEMO_PRIVATE_KEY_FILE"):
         missing.append("EXNESS_DEMO_PRIVATE_KEY or EXNESS_DEMO_PRIVATE_KEY_FILE")
@@ -400,24 +403,28 @@ async def exness_demo_harness() -> ContractHarness:
         pytest.skip(f"Exness demo credentials missing: {', '.join(missing)}")
     if env["EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT"].strip().lower() != "yes":
         pytest.skip("set EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes only if the account is a DEMO account")
-    from trader.brokers.registry import BrokerDeps, default_registry
-    from trader.config.settings import AccountConfig
-
-    symbol = env.get("EXNESS_DEMO_SYMBOL", "EURUSD")
-    account = AccountConfig.model_validate(
+    return AccountConfig.model_validate(
         {
             "id": "contract-exness-demo",
             "broker": "exness",
             "environment": "demo",
             "account_id": env["EXNESS_DEMO_ACCOUNT_ID"],
             "secrets_ref": "EXNESS_DEMO",
-            "symbols": [symbol],
+            "symbols": [env.get("EXNESS_DEMO_SYMBOL", "EURUSD")],
             "exness": {
                 "gateway_url": env["EXNESS_DEMO_GATEWAY_URL"],
                 "symbol_suffix": env.get("EXNESS_DEMO_SYMBOL_SUFFIX", ""),
             },
         }
     )
+
+
+async def exness_demo_harness() -> ContractHarness:
+    """DEMO ONLY. Exness does not separate demo and real accounts by host, so the tests refuse to run
+    unless EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes declares that EXNESS_DEMO_ACCOUNT_ID is a demo account."""
+    env = demo_env()
+    account = exness_demo_account(env)
+    symbol = account.symbols[0]
     broker = default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
     assert isinstance(broker, ExnessBroker)
 

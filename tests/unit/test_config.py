@@ -146,3 +146,13 @@ def test_cli_live_banner_when_confirmed(capsys: pytest.CaptureFixture[str]) -> N
     path = str(ROOT / "config/live.yaml.example")
     assert main(["run", "--config", path, "--confirm-live"], env={"TRADER_MODE": "live"}) == 0
     assert "LIVE TRADING" in capsys.readouterr().err
+
+
+def test_live_example_spells_out_exactly_the_risk_defaults() -> None:
+    """config/live.yaml.example documents every risk default; this keeps them in sync (and makes any change
+    to a default visible in review)."""
+    from trader.config.risk import RiskConfig, RiskLimits
+
+    config = load_config(ROOT / "config/live.yaml.example")
+    assert config.accounts[0].risk == RiskConfig()
+    assert set(config.accounts[0].risk.limits.model_fields_set) == set(RiskLimits.model_fields)

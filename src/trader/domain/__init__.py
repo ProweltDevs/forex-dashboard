@@ -3,6 +3,7 @@
 from .enums import (
     ConnectionState,
     FeedState,
+    KillLevel,
     OrderStatus,
     OrderType,
     PositionChange,
@@ -23,6 +24,7 @@ from .events import (
     PositionEvent,
     ReconcileEvent,
     RiskEvent,
+    RiskStateEvent,
     StrategyEvent,
     TickEvent,
 )
@@ -55,6 +57,7 @@ __all__ = [
     "Fill",
     "FillEvent",
     "Instrument",
+    "KillLevel",
     "Order",
     "OrderEvent",
     "OrderIntent",
@@ -67,6 +70,7 @@ __all__ = [
     "ReconcileEvent",
     "RiskDecision",
     "RiskEvent",
+    "RiskStateEvent",
     "Side",
     "StatusChange",
     "StrategyEvent",
