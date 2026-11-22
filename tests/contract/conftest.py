@@ -11,6 +11,8 @@ ADAPTERS = [
     pytest.param("paper", id="paper"),
     pytest.param("ctrader-fake", id="ctrader-fake"),
     pytest.param("ctrader-demo", id="ctrader-demo", marks=pytest.mark.demo),
+    pytest.param("exness-fake", id="exness-fake"),
+    pytest.param("exness-demo", id="exness-demo", marks=pytest.mark.demo),
 ]
 
 
