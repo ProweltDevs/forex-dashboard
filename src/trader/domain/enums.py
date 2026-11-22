@@ -100,6 +100,11 @@ class ConnectionState(StrEnum):
     DEGRADED = "DEGRADED"
 
 
+class FeedState(StrEnum):
+    LIVE = "LIVE"
+    STALE = "STALE"
+
+
 class PositionChange(StrEnum):
     OPENED = "OPENED"
     MODIFIED = "MODIFIED"

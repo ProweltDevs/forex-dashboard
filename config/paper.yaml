@@ -4,6 +4,15 @@ data_dir: data
 logging:
   level: INFO
   json: true
+market_data:
+  timeframes: [M1, M5, M15, H1]
+  price_source: bid            # broker candles are bid-based
+  day_offset_minutes: 0        # -120 = trading days/weeks start 22:00 UTC (NY close / UTC+2 server)
+  bar_history: 1000
+  bar_grace_ms: 2000           # wait this long after a bar's end for late ticks
+  warmup_bars: 300
+  stale: {min_silence_s: 15, max_silence_s: 120, multiplier: 20}
+  recorder: {enabled: true, batch_size: 5000, flush_interval_s: 10}
 accounts:
   - id: paper-main
     broker: paper

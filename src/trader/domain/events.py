@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from .enums import ConnectionState, OrderStatus, PositionChange, RiskDecision
+from .enums import ConnectionState, FeedState, OrderStatus, PositionChange, RiskDecision
 from .models import AccountState, Bar, Fill, Order, Position, Tick
 
 
@@ -69,6 +69,19 @@ class ConnectionEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class FeedEvent:
+    """A symbol's price feed went stale (no ticks for longer than expected while its session is open)
+    or came back. Risk uses STALE as a circuit-breaker trigger (SPEC §7)."""
+
+    broker: str
+    symbol: str
+    state: FeedState
+    ts: datetime
+    last_tick_ts: datetime | None
+    silence_ms: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RiskEvent:
     account_id: str
     decision: RiskDecision
@@ -95,6 +108,7 @@ type DomainEvent = (
     | PositionEvent
     | AccountEvent
     | ConnectionEvent
+    | FeedEvent
     | RiskEvent
     | StrategyEvent
 )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -17,8 +18,11 @@ _CLOSED = object()
 
 
 class FakeTickSource:
-    """Ticks are pushed by the test (``push``/``push_quote``). Candles are synthetic flat bars around the
-    last known mid (or ``base_prices``), aligned to the timeframe — enough to exercise candle plumbing."""
+    """Ticks are pushed by the test (``push``/``push_quote``).
+
+    Candles behave like a broker's: when ticks were pushed inside the requested window they are aggregated
+    from those ticks (bid OHLC, tick-count volume, UTC boundaries, no bars without ticks). Otherwise they are
+    synthetic flat bars at the last known price (or ``base_prices``), enough for warm-up plumbing."""
 
     def __init__(
         self,
@@ -26,6 +30,7 @@ class FakeTickSource:
         clock: Clock,
         *,
         base_prices: dict[str, Decimal] | None = None,
+        history: int = 200_000,
     ) -> None:
         self._instruments = {i.symbol: i for i in instruments}
         self._clock = clock
@@ -34,6 +39,8 @@ class FakeTickSource:
         self._last: dict[str, Tick] = {}
         self._base = dict(base_prices or {})
         self._consumed = False
+        self._history: dict[str, deque[Tick]] = {}
+        self._history_len = history
 
     async def instruments(self) -> list[Instrument]:
         return list(self._instruments.values())
@@ -52,6 +59,7 @@ class FakeTickSource:
         if tick.symbol not in self._instruments:
             raise UnknownSymbol(tick.symbol)
         self._last[tick.symbol] = tick
+        self._history.setdefault(tick.symbol, deque(maxlen=self._history_len)).append(tick)
         self._queue.put_nowait(tick)
 
     def push_quote(self, symbol: str, bid: Decimal, ask: Decimal, ts: datetime | None = None) -> Tick:
@@ -80,6 +88,9 @@ class FakeTickSource:
         duration = tf.duration
         if duration is None:
             return []  # calendar timeframes are not synthesised
+        from_ticks = self._candles_from_ticks(symbol, tf, duration, start, end)
+        if from_ticks:
+            return from_ticks
         last = self._last.get(symbol)
         price = last.mid if last is not None else self._base.get(symbol, Decimal(1))
         price = self._instruments[symbol].round_price(price)
@@ -100,4 +111,31 @@ class FakeTickSource:
                 complete=ms + step_ms <= now_ms,
             )
             for ms in range(first, end_ms, step_ms)
+        ]
+
+    def _candles_from_ticks(
+        self, symbol: str, tf: Timeframe, duration: timedelta, start: datetime, end: datetime
+    ) -> list[Bar]:
+        step_ms = int(duration / timedelta(milliseconds=1))
+        lo, hi = to_epoch_ms(start), to_epoch_ms(end)
+        buckets: dict[int, list[Decimal]] = {}
+        for tick in self._history.get(symbol, ()):
+            ms = to_epoch_ms(tick.ts)
+            bucket = ms // step_ms * step_ms
+            if lo <= bucket < hi:
+                buckets.setdefault(bucket, []).append(tick.bid)
+        now_ms = to_epoch_ms(self._clock.now())
+        return [
+            Bar(
+                symbol=symbol,
+                timeframe=tf,
+                start=from_epoch_ms(ms),
+                open=prices[0],
+                high=max(prices),
+                low=min(prices),
+                close=prices[-1],
+                volume=Decimal(len(prices)),
+                complete=ms + step_ms <= now_ms,
+            )
+            for ms, prices in sorted(buckets.items())
         ]

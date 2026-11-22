@@ -41,3 +41,10 @@ cTrader demo setup: fill in `CTRADER_DEMO_CLIENT_ID/_CLIENT_SECRET/_REDIRECT_URI
 
 Exness demo setup: fill in the `EXNESS_DEMO_*` block in `.env` (including `EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes`
 for a demo account only), then `uv run pytest -m demo`.
+
+## Market data
+
+Ticks feed a non-blocking bus, bar builder and stale-feed monitor, and are recorded to
+`data/ticks/{broker}/{symbol}/{yyyy-mm-dd}.parquet` (the future backtest dataset). See
+[ADR 0006](docs/adr/0006-market-data.md). `uv run pytest -m demo tests/contract/test_bars_vs_broker.py -s`
+compares bars built from live ticks with the broker's candles.
