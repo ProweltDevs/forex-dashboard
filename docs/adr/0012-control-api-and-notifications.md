@@ -90,6 +90,10 @@ Lifecycle:
   - stale feeds, to say "feed back".
 - **`TelegramChannel`:** plain-text `sendMessage` over httpx. Errors never include the URL, because the
   token is in the URL path. The log redaction gained a Telegram-token pattern.
+  - httpx itself logs every request URL. The structlog processor only redacts what *our* handler
+    renders, so redaction now also runs in a log-record factory: secrets are scrubbed when a stdlib
+    record is created, before any handler sees it. CI showed why: pytest's log capture printed the test
+    token.
 - **`EmailChannel`:** smtplib in a worker thread with STARTTLS. Default minimum severity `warning`.
 - **`TelegramBot`:** long-polls `getUpdates`. It accepts commands only from the configured chat, only if
   that chat is **private**, and only if the message is younger than 2 minutes, so a queued `/kill` is not
@@ -112,5 +116,8 @@ assumption would show up in the probe, not in CI.
 - **API-created strategies** last until the process stops; the config file stays the source of truth for
   what runs after a restart.
 - **SL/TP classification is a price heuristic.** A manual close right at the SL price reads "SL hit".
+- **Two flaky-test lessons from CI:** the synthetic feed moves about 4 pips per tick, so an order with a
+  stop 3 pips from a price read a moment earlier can be (rightly) rejected. The alert tests retry with a
+  fresh price, and open a BUY and a SELL so one stop is hit within a few ticks.
 - **The audit file grows without bound** (one short line per command). Rotation can come with the
   deployment work in phase 11.

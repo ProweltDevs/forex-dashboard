@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import smtplib
 from typing import Any, ClassVar
 
@@ -64,6 +65,18 @@ async def test_get_updates() -> None:
         return httpx.Response(200, json={"ok": True, "result": [{"update_id": 11}, "junk"]})
 
     assert await channel(handler).get_updates(11, 5) == [{"update_id": 11}]
+
+
+def test_bot_tokens_never_reach_any_log_handler(caplog: pytest.LogCaptureFixture) -> None:
+    # httpx logs every request URL at INFO; the Bot API URL holds the token. Any handler (here pytest's
+    # capture, which is not ours) must only ever see the redacted text.
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        logging.getLogger("httpx").info('HTTP Request: %s %s "%s"', "POST", url, "HTTP/1.1 200 OK")
+    [record] = caplog.records
+    assert TOKEN not in record.getMessage()
+    assert TOKEN not in caplog.text
+    assert "/bot***REDACTED***/getUpdates" in record.getMessage()
 
 
 def test_bot_tokens_are_redacted_from_logs() -> None:

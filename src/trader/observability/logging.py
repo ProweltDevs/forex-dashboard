@@ -116,8 +116,36 @@ def configure_logging(level: str = "INFO", *, json: bool = True) -> None:
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(log_level)
+    install_record_redaction()
 
 
 def get_logger(name: str | None = None) -> structlog.typing.FilteringBoundLogger:
     logger: structlog.typing.FilteringBoundLogger = structlog.get_logger(name)
     return logger
+
+
+def install_record_redaction() -> None:
+    """Scrub secrets from every stdlib log record when it is created, so every handler sees the
+    redacted text: ours, and any other (test log capture, a library's or host's own handler). Libraries
+    log URLs (httpx: "HTTP Request: POST https://.../bot<token>/sendMessage"), and some URLs hold
+    secrets. Idempotent; runs when this module is imported."""
+    current = logging.getLogRecordFactory()
+    if getattr(current, "_trader_redacting", False):
+        return
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = current(*args, **kwargs)
+        try:
+            message = record.getMessage()
+        except Exception:  # a malformed record: leave it to the handler to report
+            return record
+        scrubbed = _scrub_str(message)
+        if scrubbed != message:
+            record.msg, record.args = scrubbed, None
+        return record
+
+    factory._trader_redacting = True  # type: ignore[attr-defined]
+    logging.setLogRecordFactory(factory)
+
+
+install_record_redaction()

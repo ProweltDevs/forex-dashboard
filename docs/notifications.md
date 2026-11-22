@@ -36,9 +36,12 @@ a position closed in a form every adapter shares, so this says what the prices s
   and a summary follows once there is room. **Critical notices are never rate-limited.**
 - **Per-channel minimum severity:** Telegram `info`, email `warning` by default.
 - **Retries:** 3 attempts, honouring Telegram's `retry_after`; then the message is dropped and logged.
-- **Secrets:** the bot token is part of every Bot API URL. It is never logged: errors are reported by type
-  and HTTP status, and the log redaction also scrubs anything shaped like a bot token. SMTP errors are
-  reported by type only.
+- **Secrets:** the bot token is part of every Bot API URL. It is never logged:
+  - Our errors are reported by type and HTTP status, never by exception text.
+  - httpx logs every request URL at INFO. Every stdlib log record is scrubbed when it is created
+    (`install_record_redaction`), so every handler, not only ours, sees `bot***REDACTED***`. CI caught
+    this: pytest's own log capture showed the (fake) test token before the fix.
+  - SMTP errors are reported by type only.
 
 ## Telegram commands (`notify.telegram.commands: true`)
 

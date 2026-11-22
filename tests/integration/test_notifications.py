@@ -5,6 +5,7 @@ dedupe, and shutdown. Commands from another chat or a group are ignored."""
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from pathlib import Path
 
@@ -30,6 +31,21 @@ def notify_config(tmp_path: Path, fake: FakeTelegram, *, fills: bool = True) -> 
 
 
 ENV = {"TELEGRAM_BOT_TOKEN": BOT_TOKEN, "TELEGRAM_CHAT_ID": CHAT_ID}
+TIGHT = Decimal("0.0003")  # the synthetic walk moves ~4 pips a tick: this stop is hit almost at once
+
+
+async def open_with_tight_sl(run: Running, side: str) -> dict[str, object]:
+    """A manual order with a stop just beyond the market. The price can move past the stop between
+    reading it and the risk check (the order is then rightly rejected), so retry with a fresh price."""
+    for _ in range(20):
+        bid, ask = run.price()
+        sl = bid - TIGHT if side == "BUY" else ask + TIGHT
+        body = {"account": ACCOUNT, "symbol": "EURUSD", "side": side, "volume": "0.01", "sl": str(sl)}
+        order: dict[str, object] = (await run.client.post("/orders", json=body)).json()
+        if order["status"] != "REJECTED":
+            return order
+        await asyncio.sleep(0.03)
+    raise AssertionError(f"no {side} order with a tight stop was accepted")
 
 
 async def test_alerts_fire_and_telegram_commands_work(tmp_path: Path) -> None:
@@ -59,12 +75,14 @@ async def _scenario(run: Running, tg: FakeTelegram) -> None:
     assert "WARNING" in reject
     assert "manual: BUY 0.01 EURUSD MARKET: risk:loss_per_trade" in reject
 
-    # Fill, then the SL is hit (a tight stop on a fast random walk).
-    bid, _ = run.price()
-    await c.post("/orders", json=no_sl | {"sl": str(bid - Decimal("0.0003"))})
+    # Fills, then an SL is hit: a BUY and a SELL with tight stops on a fast random walk, so whichever way
+    # the price goes, one stop is hit within a few ticks.
+    await open_with_tight_sl(run, "BUY")
+    await open_with_tight_sl(run, "SELL")
     await tg.wait_text("manual: BUY 0.01 EURUSD @")
+    await tg.wait_text("manual: SELL 0.01 EURUSD @")
     sl_hit = await tg.wait_text("SL hit EURUSD", timeout=30)
-    assert "manual: BUY 0.01 EURUSD closed @" in sl_hit
+    assert " 0.01 EURUSD closed @" in sl_hit
     assert "P&L -" in sl_hit
 
     # /kill from the allowed private chat: the kill switch through Control, audited as telegram.
@@ -126,20 +144,13 @@ async def _scenario(run: Running, tg: FakeTelegram) -> None:
     assert notifier is not None
     assert notifier.notifier.stats.deduped >= 1
     assert notifier.notifier.stats.failed == 0
-    assert len(tg.texts("Order rejected EURUSD")) == 1
+    assert len(tg.texts("risk:loss_per_trade")) == 1  # the two identical rejects: sent once
 
 
 async def test_without_fill_notices_sl_hits_still_fire(tmp_path: Path) -> None:
     async with fake_telegram() as tg, running_app(notify_config(tmp_path, tg, fills=False), env=ENV) as run:
         await wait_for(lambda: run.app.accounts[ACCOUNT].oms.view().last_ticks, what="ticks")
-        bid, _ = run.price()
-        body = {
-            "account": ACCOUNT,
-            "symbol": "EURUSD",
-            "side": "BUY",
-            "volume": "0.01",
-            "sl": str(bid - Decimal("0.0003")),
-        }
-        await run.client.post("/orders", json=body)
+        await open_with_tight_sl(run, "BUY")
+        await open_with_tight_sl(run, "SELL")
         await tg.wait_text("SL hit EURUSD", timeout=30)
         assert not [t for t in tg.sent if "INFO: Fill " in t]
