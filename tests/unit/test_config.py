@@ -143,8 +143,8 @@ def test_cli_refuses_live_without_confirmation(capsys: pytest.CaptureFixture[str
 
 
 def test_cli_live_banner_when_confirmed(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
-    """Confirmed live mode prints the banner, then (no credentials here) fails building the account with a
-    config error, before any network connection is attempted."""
+    """Confirmed live mode prints the banner, then (no database URL or credentials here) stops with a config
+    error, before any network connection is attempted."""
     path = str(ROOT / "config/live.yaml.example")
     env_file = str(tmp_path / "none.env")
     assert (
@@ -154,7 +154,7 @@ def test_cli_live_banner_when_confirmed(capsys: pytest.CaptureFixture[str], tmp_
     err = capsys.readouterr().err
     assert "LIVE TRADING" in err
     assert "risk: max order 1 lots" in err
-    assert "CTRADER_LIVE_" in err  # missing secrets: refused before connecting
+    assert "TRADER_DB_URL is not set" in err  # missing configuration: refused before connecting
 
 
 def test_live_example_spells_out_exactly_the_risk_defaults() -> None:

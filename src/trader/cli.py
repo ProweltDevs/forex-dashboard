@@ -27,7 +27,16 @@ from pathlib import Path
 
 from trader import __version__
 from trader.analytics.books import offline_report
-from trader.app import App, RunReport, build_account, kill_account, risk_summary, run_app, run_pnl_check
+from trader.app import (
+    App,
+    RunReport,
+    audit,
+    build_account,
+    kill_account,
+    risk_summary,
+    run_app,
+    run_pnl_check,
+)
 from trader.config.loader import load_config, resolve_mode
 from trader.config.secrets import read_env_file, update_env_file
 from trader.config.settings import AccountConfig, AppConfig
@@ -120,10 +129,26 @@ def _kill(args: argparse.Namespace, config: AppConfig, env: Mapping[str, str]) -
     except (ConfigError, BrokerError) as exc:
         print(f"kill failed: {exc}", file=sys.stderr)
         return 2
-    print(
-        f"{account.id}: level={result.level} positions_left={result.positions_left} "
+    outcome = (
+        f"level={result.level} positions_left={result.positions_left} "
         f"pending_left={result.orders_left} {'done' if result.done else 'NOT DONE (timeout)'}"
     )
+    print(f"{account.id}: {outcome}")
+    try:
+        asyncio.run(
+            audit(
+                config,
+                env,
+                SystemClock(),
+                actor="cli",
+                action="kill_reset" if level is None else "kill",
+                account_id=account.id,
+                details={"level": None if level is None else str(level), "reason": args.reason},
+                result=outcome,
+            )
+        )
+    except (ConfigError, OSError) as exc:
+        print(f"warning: audit record not written: {exc}", file=sys.stderr)
     return 0 if result.done else 1
 
 

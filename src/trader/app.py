@@ -16,9 +16,11 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
-from trader.analytics.books import AccountBooks, build_books, load_offline
+from trader.analytics.books import AccountBooks, build_books, load_offline, params_hash
+from trader.analytics.journal import TradeRecord
 from trader.analytics.statement import StatementCheck, compare, day_window
 from trader.brokers.base import Broker, MarketDataSource
 from trader.brokers.feeds import BrokerFeed, SyntheticFeed
@@ -33,6 +35,7 @@ from trader.marketdata.service import MarketDataService
 from trader.observability.logging import get_logger
 from trader.oms import AccountRuntime, JsonFileStore, OmsSettings, OrderManager
 from trader.persistence.files import write_atomic
+from trader.persistence.service import Persistence
 from trader.risk.engine import RiskEngine
 from trader.strategy.registry import resolve
 from trader.strategy.runner import StrategyRunner, StrategySpec, StrategyStateStore
@@ -216,6 +219,7 @@ class App:
         self.feeds: dict[str, BrokerFeed | SyntheticFeed] = {}
         self.accounts: dict[str, AccountServices] = {}
         self.runner: StrategyRunner | None = None
+        self.persistence = Persistence.from_config(config, dict(env), clock)  # None without a database
         self.books: dict[str, AccountBooks] = {}
         self._report_day: dict[str, date] = {}
         self._reporter: asyncio.Task[None] | None = None
@@ -237,6 +241,19 @@ class App:
 
     async def start(self) -> None:
         self._started = self._clock.now()
+        db = self.persistence
+        if db is not None:
+            await db.start()  # never blocks startup: an unreachable database only means WAL buffering
+            for acc in self.config.accounts:
+                db.put(
+                    "account",
+                    acc.id,
+                    {
+                        "broker": acc.broker,
+                        "environment": acc.environment,
+                        "broker_account": acc.account_id or None,
+                    },
+                )
         await self.market.start()
         sources = self._sources()
         by_id = {a.id: a for a in self.config.accounts}
@@ -277,6 +294,12 @@ class App:
             await asyncio.to_thread(books.journal.load)  # closed trades first: the ledger replay skips them
             await books.portfolio.start()
             self.books[acc.id] = books
+            if db is not None:
+                db.attach(services.oms.events, acc.id)
+                db.attach(books.portfolio.events, acc.id, name="persistence-alerts")
+                for inst in services.oms.view().instruments.values():
+                    db.put("instrument", acc.id, inst)
+                books.journal.on_closed.append(partial(self._persist_trade, acc.id))
             self._report_day[acc.id] = books.portfolio.ledger_day(self._clock.now())
         self.runner = StrategyRunner(
             self.market,
@@ -300,8 +323,12 @@ class App:
                     seed=st.seed,
                 )
             )
+        if db is not None:
+            db.attach(self.runner.events, None, name="persistence-strategies")
+            self.runner.on_state_saved.append(self._persist_state)
         await self.runner.run()
         await self.runner.start_all()
+        self._persist_strategies()
         self._reporter = asyncio.create_task(self._daily_reports(), name="daily-reports")
         _log.info("app_started", accounts=sorted(self.accounts), strategies=sorted(self.runner.handles))
 
@@ -347,6 +374,9 @@ class App:
         for feed in self.feeds.values():
             await feed.close()
         await self.market.stop()
+        if self.persistence is not None:
+            self._persist_strategies()
+            await self.persistence.stop()  # last: flushes to the database, or to the WAL if it is down
         report.stopped = self._clock.now()
         _log.info("app_stopped", strategy_errors=report.strategy_errors)
         return report
@@ -363,6 +393,36 @@ class App:
         except TimeoutError:
             _log.warning(
                 "shutdown_orders_still_in_flight", detail="they stay persisted and resolve on restart"
+            )
+
+    def _persist_trade(self, account_id: str, trade: TradeRecord) -> None:
+        if self.persistence is not None:
+            self.persistence.put("trade", account_id, trade.to_json())
+
+    def _persist_state(self, strategy_id: str, text: str) -> None:
+        if self.persistence is not None:
+            self.persistence.put(
+                "strategy_state", None, {"strategy_id": strategy_id, "state": json.loads(text)}
+            )
+
+    def _persist_strategies(self) -> None:
+        if self.persistence is None or self.runner is None:
+            return
+        by_id = {s.id: s for s in self.config.strategies}
+        for sid, status, _reason, _stats in self.runner.status():
+            st = by_id[sid]
+            cls = resolve(st.class_)
+            self.persistence.put(
+                "strategy",
+                st.account,
+                {
+                    "strategy_id": sid,
+                    "class_name": f"{cls.__module__}:{cls.__name__}",
+                    "version": cls.version,
+                    "params": dict(st.params),
+                    "params_hash": params_hash(st.params),
+                    "status": str(status),
+                },
             )
 
     async def _daily_reports(self) -> None:
@@ -462,3 +522,26 @@ async def run_pnl_check(
         await broker.close()
     ledger = (await asyncio.to_thread(load_offline, config.data_dir, account)).ledger
     return compare(day, [e.fill for e in ledger.entries(day=day)], broker_fills)
+
+
+async def audit(
+    config: AppConfig,
+    env: Mapping[str, str],
+    clock: Clock,
+    *,
+    actor: str,
+    action: str,
+    account_id: str | None,
+    details: Mapping[str, object],
+    result: str,
+) -> None:
+    """Record a manual command in ``audit_log`` (SPEC §12). With the database down it lands in the WAL and
+    reaches the database with the next writer start. A no-op without a configured database."""
+    persistence = Persistence.from_config(config, dict(env), clock)
+    if persistence is None:
+        return
+    await persistence.start()
+    persistence.put(
+        "audit", account_id, {"actor": actor, "action": action, "details": dict(details), "result": result}
+    )
+    await persistence.stop()
