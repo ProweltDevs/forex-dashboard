@@ -1,6 +1,7 @@
 """Command-line entry point.
 
-    trader run|check-config --config <file> [--confirm-live]
+    trader run --config <file> [--duration 24h] [--confirm-live]
+    trader check-config --config <file> [--confirm-live]
     trader kill --config <file> --account <id> (--level PAUSE_NEW|CANCEL_PENDING|FLATTEN_ALL | --reset)
                 --reason <text> [--timeout 60] [--confirm-live]
     trader ctrader-auth [--environment demo] [--secrets-ref CTRADER_DEMO] [--redirect-uri URL]
@@ -15,13 +16,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
+import signal
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 
 from trader import __version__
-from trader.app import build_account, kill_account, risk_summary
+from trader.app import App, RunReport, build_account, kill_account, risk_summary, run_app
 from trader.config.loader import load_config, resolve_mode
 from trader.config.secrets import read_env_file, update_env_file
 from trader.config.settings import AppConfig
@@ -64,7 +67,17 @@ def _parser() -> argparse.ArgumentParser:
             action="store_true",
             help="required (together with TRADER_MODE=live) to trade a live account",
         )
+        if name == "run":
+            cmd.add_argument("--duration", type=parse_duration, default=None, help="stop after e.g. 90m, 24h")
     return parser
+
+
+def parse_duration(text: str) -> timedelta:
+    m = re.fullmatch(r"(\d+)([smhd])", text.strip())
+    if m is None:
+        raise argparse.ArgumentTypeError("duration like 30s, 90m, 24h or 2d")
+    unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[m.group(2)]
+    return timedelta(**{unit: int(m.group(1))})
 
 
 def live_banner(config: AppConfig) -> str:
@@ -165,9 +178,24 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     if mode is TradingMode.LIVE:
         print(live_banner(config), file=sys.stderr)
     log.info("startup", mode=str(mode), accounts=[a.id for a in config.accounts], version=__version__)
-    # The long-running process (strategies + market data) arrives with the strategy runner (phase 7).
-    log.warning("runtime_not_available", detail="no strategy runner yet; exiting after config validation")
-    return 0
+    return _run(config, merged, args.duration)
+
+
+def _run(config: AppConfig, env: Mapping[str, str], duration: timedelta | None) -> int:
+    async def main_async() -> RunReport:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop.set)
+        return await run_app(App(config, env=env, clock=SystemClock()), stop, duration)
+
+    try:
+        report = asyncio.run(main_async())
+    except (ConfigError, BrokerError) as exc:
+        print(f"run failed: {exc}", file=sys.stderr)
+        return 2
+    print("\n".join(report.lines()))
+    return 0 if report.strategy_errors == 0 else 1
 
 
 if __name__ == "__main__":

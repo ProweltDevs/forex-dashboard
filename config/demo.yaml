@@ -27,3 +27,24 @@ accounts:
       symbol_suffix: ""            # e.g. "m" if instruments are named EURUSDm
       symbol_aliases: {}
       hedging: true
+
+# Strategies on the DEMO accounts (warm-up comes from broker candles, so they trade from the first bar).
+strategies:
+  - id: ema-cross-ctrader-eurusd-m5
+    class: ema_cross
+    account: ctrader-demo
+    symbols: [EURUSD]
+    timeframes: [M5]
+    params: {fast: 12, slow: 26, risk_pct: "0.25"}
+  - id: donchian-ctrader-gbpusd-m15
+    class: donchian_breakout
+    account: ctrader-demo
+    symbols: [GBPUSD]
+    timeframes: [M15]
+    params: {period: 20, exit_after_bars: 16, risk_pct: "0.25"}
+  - id: rsi-exness-xauusd-m5
+    class: rsi_reversion
+    account: exness-demo
+    symbols: [XAUUSD]
+    timeframes: [M5]
+    params: {risk_pct: "0.25"}

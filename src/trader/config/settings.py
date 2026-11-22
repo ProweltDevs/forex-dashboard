@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -41,6 +41,14 @@ class PaperRateLimitConfig(_Model):
     burst: int = Field(ge=1)
 
 
+class SyntheticFeedConfig(_Model):
+    """Seeded random-walk prices (NOT market data): lets paper mode run without broker credentials."""
+
+    seed: int = 1
+    tick_interval_ms: int = Field(default=250, ge=10)
+    volatility: float = Field(default=0.00005, gt=0, le=0.01)  # per-tick stdev of the log return
+
+
 class PaperConfig(_Model):
     """Fill simulation for the paper broker (see ``trader.brokers.paper.PaperSettings``)."""
 
@@ -57,6 +65,13 @@ class PaperConfig(_Model):
     rollover_hour_utc: int = Field(default=21, ge=0, le=23)
     rate_limit: PaperRateLimitConfig | None = None
     market_data_from: str | None = None  # id of another account to source live ticks from
+    synthetic_feed: SyntheticFeedConfig | None = None  # random-walk prices instead (no credentials needed)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> Self:
+        if self.market_data_from is not None and self.synthetic_feed is not None:
+            raise ValueError("set either market_data_from or synthetic_feed, not both")
+        return self
 
 
 class CTraderOptions(_Model):
@@ -164,6 +179,39 @@ class MarketDataConfig(_Model):
         return value
 
 
+_STRATEGY_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+class StrategyConfig(_Model):
+    """One strategy instance (SPEC §8). Several instances of one class may run with different params."""
+
+    id: str  # instance id: the strategy_id stamped on every order
+    class_: str = Field(alias="class")  # built-in name (e.g. ema_cross) or "package.module:ClassName"
+    account: str  # trading account id
+    symbols: tuple[str, ...]
+    timeframes: tuple[Timeframe, ...] = ()
+    params: dict[str, Any] = Field(default_factory=dict)  # validated by the strategy's Params model
+    enabled: bool = True
+    max_errors: int = Field(default=5, ge=1)  # errors before this strategy is auto-paused
+    callback_budget_ms: float = Field(default=50.0, gt=0)  # slower callbacks are logged
+    seed: int = 0  # ctx.random seed
+    warmup_bars: int | None = Field(default=None, ge=0)  # default: the class's warmup_bars
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        if not _STRATEGY_ID.fullmatch(value):
+            raise ValueError("strategy id must be lowercase letters, digits, '-' or '_' (max 64)")
+        return value
+
+    @field_validator("symbols")
+    @classmethod
+    def _check_symbols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("a strategy needs at least one symbol")
+        return value
+
+
 class AppConfig(_Model):
     mode: TradingMode = TradingMode.PAPER
     data_dir: Path = Path("data")
@@ -171,6 +219,28 @@ class AppConfig(_Model):
     database: DatabaseConfig | None = None
     market_data: MarketDataConfig = MarketDataConfig()
     accounts: tuple[AccountConfig, ...] = ()
+    strategies: tuple[StrategyConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _check_strategies(self) -> Self:
+        ids = [s.id for s in self.strategies]
+        if len(set(ids)) != len(ids):
+            raise ValueError("strategy ids must be unique")
+        accounts = {a.id: a for a in self.accounts}
+        sources = {a.paper.market_data_from for a in self.accounts if a.paper and a.paper.market_data_from}
+        for st in self.strategies:
+            acc = accounts.get(st.account)
+            if acc is None:
+                raise ValueError(f"strategy {st.id}: unknown account {st.account!r}")
+            if acc.id in sources:
+                raise ValueError(f"strategy {st.id}: {acc.id} is a market-data source, not a trading account")
+            missing = [s for s in st.symbols if s not in acc.symbols]
+            if missing:
+                raise ValueError(f"strategy {st.id}: symbols {missing} are not in account {acc.id}'s symbols")
+            tfs = [tf for tf in st.timeframes if tf not in self.market_data.timeframes]
+            if tfs:
+                raise ValueError(f"strategy {st.id}: timeframes {tfs} are not in market_data.timeframes")
+        return self
 
     @model_validator(mode="after")
     def _check_accounts(self) -> Self:
