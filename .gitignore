@@ -1,0 +1,33 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+config/live.yaml
+
+# Runtime data
+data/
+logs/
+*.wal
+
+# Local
+*.bundle
+.idea/
+.vscode/
+.DS_Store
