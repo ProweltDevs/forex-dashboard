@@ -18,3 +18,23 @@ uv run trader check-config --config config/paper.yaml
 ```
 
 Default mode is `paper`. Live trading requires `TRADER_MODE=live` **and** `--confirm-live`.
+
+## Secrets
+
+Keys and tokens live in `.env` (gitignored, any `*.env` file is ignored). Start from the template:
+
+```bash
+cp .env.example .env && chmod 600 .env
+uv run trader secrets-key      # key that encrypts stored broker tokens
+```
+
+## Brokers
+
+| Broker | Status | Docs |
+|---|---|---|
+| paper | contract suite green | [ADR 0003](docs/adr/0003-broker-interface-and-paper-broker.md) |
+| cTrader Open API | green on the in-process fake server; demo run pending credentials | [docs/brokers/ctrader.md](docs/brokers/ctrader.md) |
+| Exness Trader API | phase 3 | — |
+
+cTrader demo setup: fill in `CTRADER_DEMO_CLIENT_ID/_CLIENT_SECRET/_REDIRECT_URI` in `.env`, run
+`uv run trader ctrader-auth`, set `CTRADER_DEMO_ACCOUNT_ID`, then `uv run pytest -m demo`.
