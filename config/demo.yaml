@@ -16,6 +16,11 @@ accounts:
   - id: exness-demo
     broker: exness
     environment: demo
-    account_id: "0000000"
-    secrets_ref: EXNESS_DEMO
+    account_id: "0000000"          # numeric Exness trading account id (a DEMO account)
+    secrets_ref: EXNESS_DEMO       # EXNESS_DEMO_API_KEY + EXNESS_DEMO_PRIVATE_KEY (or _PRIVATE_KEY_FILE)
     symbols: [EURUSD, XAUUSD]
+    exness:
+      gateway_url: https://replace-with-dns-widget-host.invalid   # Gateway host from Key Management
+      symbol_suffix: ""            # e.g. "m" if instruments are named EURUSDm
+      symbol_aliases: {}
+      hedging: true

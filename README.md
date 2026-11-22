@@ -34,7 +34,10 @@ uv run trader secrets-key      # key that encrypts stored broker tokens
 |---|---|---|
 | paper | contract suite green | [ADR 0003](docs/adr/0003-broker-interface-and-paper-broker.md) |
 | cTrader Open API | green on the in-process fake server; demo run pending credentials | [docs/brokers/ctrader.md](docs/brokers/ctrader.md) |
-| Exness Trader API | phase 3 | — |
+| Exness Trader API | green on the in-process fake server; demo run pending credentials | [docs/brokers/exness.md](docs/brokers/exness.md) |
 
 cTrader demo setup: fill in `CTRADER_DEMO_CLIENT_ID/_CLIENT_SECRET/_REDIRECT_URI` in `.env`, run
 `uv run trader ctrader-auth`, set `CTRADER_DEMO_ACCOUNT_ID`, then `uv run pytest -m demo`.
+
+Exness demo setup: fill in the `EXNESS_DEMO_*` block in `.env` (including `EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes`
+for a demo account only), then `uv run pytest -m demo`.

@@ -201,7 +201,8 @@ async def test_duplicate_client_order_id_creates_one_order(harness: ContractHarn
     first = await broker.place_order(req)
     await harness.fill_for(req.client_order_id)
     second = await broker.place_order(req)  # retry with the same client_order_id
-    if second.broker_order_id is not None:
+    # Async brokers may not know the order id at ACK time; when both ACKs carry one, they must match.
+    if first.broker_order_id is not None and second.broker_order_id is not None:
         assert second.broker_order_id == first.broker_order_id
     await asyncio.sleep(0.3)  # give a (wrongly) duplicated order time to fill
 

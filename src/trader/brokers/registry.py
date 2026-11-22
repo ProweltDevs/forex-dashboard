@@ -118,9 +118,48 @@ def _ctrader_factory(account: AccountConfig, deps: BrokerDeps) -> Broker:
     return CTraderBroker(settings, tokens=tokens, store=store, clock=deps.clock)
 
 
+def _exness_factory(account: AccountConfig, deps: BrokerDeps) -> Broker:
+    from .exness import ExnessBroker, ExnessSettings
+
+    if account.secrets_ref is None:  # guaranteed by AccountConfig validation
+        raise ConfigError(f"account {account.id!r} needs a secrets_ref")
+    if not account.account_id.isdigit():
+        raise ConfigError(f"account {account.id!r}: account_id must be the numeric Exness trading account id")
+    opts = account.exness
+    if opts is None:
+        raise ConfigError(
+            f"account {account.id!r}: set exness.gateway_url (the DNS widget host in Key Management)"
+        )
+    secrets = load_secrets(account.secrets_ref, deps.env, required=("api_key",))
+    private_key = secrets.get("private_key")
+    key_file = deps.env.get(f"{account.secrets_ref}_PRIVATE_KEY_FILE")
+    if private_key is None and key_file:
+        path = Path(key_file).expanduser()
+        if not path.is_file():
+            raise ConfigError(f"{account.secrets_ref}_PRIVATE_KEY_FILE does not point to a file")
+        private_key = SecretStr(path.read_text(encoding="utf-8"))
+    if private_key is None:
+        raise ConfigError(
+            f"missing secrets: {account.secrets_ref}_PRIVATE_KEY (or {account.secrets_ref}_PRIVATE_KEY_FILE)"
+        )
+    settings = ExnessSettings(
+        account_id=account.id,
+        exness_account_id=account.account_id,
+        gateway_url=opts.gateway_url,
+        api_key=secrets["api_key"].get_secret_value(),
+        private_key=private_key,
+        symbols=account.symbols,
+        symbol_suffix=opts.symbol_suffix,
+        symbol_aliases=dict(opts.symbol_aliases),
+        hedging=opts.hedging,
+    )
+    return ExnessBroker(settings, clock=deps.clock)
+
+
 def default_registry() -> BrokerRegistry:
-    """Registry with every adapter available in this build (exness arrives in phase 3)."""
+    """Registry with every adapter available in this build."""
     registry = BrokerRegistry()
     registry.register("paper", _paper_factory)
     registry.register("ctrader", _ctrader_factory)
+    registry.register("exness", _exness_factory)
     return registry

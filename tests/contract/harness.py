@@ -22,6 +22,7 @@ from pydantic import SecretStr
 
 from trader.brokers.base import Broker, RateLimit
 from trader.brokers.ctrader import CTraderBroker, CTraderSettings, TokenSet, TokenStore
+from trader.brokers.exness import ExnessBroker, ExnessSettings
 from trader.brokers.paper import FakeTickSource, PaperBroker, PaperSettings
 from trader.config.secrets import read_env_file
 from trader.domain import ConnectionEvent, ConnectionState, Instrument, OrderType, Side, Tick, TickEvent
@@ -254,10 +255,18 @@ async def ctrader_fake_harness() -> ContractHarness:
     server = FakeCTraderServer()
     port = await server.start()
     settings = CTraderSettings(
-        account_id="contract-ctrader-fake", ctid_trader_account_id=server.ctid, environment="demo",
-        client_id=server.client_id, client_secret=SecretStr(server.client_secret), symbols=("EURUSD",),
-        host="127.0.0.1", port=port, use_tls=False, reconnect_initial_s=0.05, account_poll_s=0.5,
-    )  # fmt: skip
+        account_id="contract-ctrader-fake",
+        ctid_trader_account_id=server.ctid,
+        environment="demo",
+        client_id=server.client_id,
+        client_secret=SecretStr(server.client_secret),
+        symbols=("EURUSD",),
+        host="127.0.0.1",
+        port=port,
+        use_tls=False,
+        reconnect_initial_s=0.05,
+        account_poll_s=0.5,
+    )
     tokens = TokenSet(SecretStr(server.access_token), SecretStr(server.refresh_token), expires_at=None)
     broker = CTraderBroker(
         settings, tokens=tokens, store=TokenStore(Path("/nonexistent"), None), clock=SystemClock()
@@ -267,9 +276,12 @@ async def ctrader_fake_harness() -> ContractHarness:
 
 DEMO_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 CTRADER_DEMO_REQUIRED = (
-    "CTRADER_DEMO_CLIENT_ID", "CTRADER_DEMO_CLIENT_SECRET", "CTRADER_DEMO_ACCESS_TOKEN",
-    "CTRADER_DEMO_REFRESH_TOKEN", "CTRADER_DEMO_ACCOUNT_ID",
-)  # fmt: skip
+    "CTRADER_DEMO_CLIENT_ID",
+    "CTRADER_DEMO_CLIENT_SECRET",
+    "CTRADER_DEMO_ACCESS_TOKEN",
+    "CTRADER_DEMO_REFRESH_TOKEN",
+    "CTRADER_DEMO_ACCOUNT_ID",
+)
 
 
 def demo_env() -> dict[str, str]:
@@ -288,11 +300,15 @@ async def ctrader_demo_harness() -> ContractHarness:
     symbol = env.get("CTRADER_DEMO_SYMBOL", "EURUSD")
     account = AccountConfig.model_validate(
         {
-            "id": "contract-ctrader-demo", "broker": "ctrader", "environment": "demo",  # never live
-            "account_id": env["CTRADER_DEMO_ACCOUNT_ID"], "secrets_ref": "CTRADER_DEMO", "symbols": [symbol],
+            "id": "contract-ctrader-demo",
+            "broker": "ctrader",
+            "environment": "demo",  # never live
+            "account_id": env["CTRADER_DEMO_ACCOUNT_ID"],
+            "secrets_ref": "CTRADER_DEMO",
+            "symbols": [symbol],
             "ctrader": {"proxy": env.get("CTRADER_PROXY") or None},
         }
-    )  # fmt: skip
+    )
     broker = default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
     assert isinstance(broker, CTraderBroker)
 
@@ -302,7 +318,118 @@ async def ctrader_demo_harness() -> ContractHarness:
     return await _ctrader_harness(broker, symbol, nothing)
 
 
+# ---------------------------------------------------------------------------------------------- exness
+
+
+async def _exness_harness(
+    broker: ExnessBroker, symbol: str, teardown_extra: Callable[[], Awaitable[None]]
+) -> ContractHarness:
+    await broker.connect()
+    recorder = EventRecorder(broker)
+    await broker.subscribe_ticks([symbol])
+    await recorder.wait_for(TickEvent, timeout=15)
+    await broker.snapshot()
+    dropped_at = [0]
+
+    async def drop() -> None:
+        dropped_at[0] = recorder.mark
+        await broker.drop_connection()
+
+    async def wait_up() -> None:
+        after = dropped_at[0]
+        await recorder.wait_for(
+            ConnectionEvent, lambda e: e.state is ConnectionState.DOWN, after=after, timeout=30
+        )
+        downs = [i for i, e in enumerate(recorder.events) if isinstance(e, ConnectionEvent) and i >= after]
+        await recorder.wait_for(
+            ConnectionEvent, lambda e: e.state is ConnectionState.UP, after=downs[0], timeout=30
+        )
+
+    async def teardown() -> None:
+        await broker.close()
+        await teardown_extra()
+
+    return ContractHarness(
+        broker=broker,
+        symbol=symbol,
+        recorder=recorder,
+        force_disconnect=drop,
+        reconnect=wait_up,
+        teardown=teardown,
+    )
+
+
+async def exness_fake_harness() -> ContractHarness:
+    from tests.integration.exness_fake import ACCOUNT, API_KEY, FakeExness
+
+    fake = FakeExness()
+    await fake.start()
+    settings = ExnessSettings(
+        account_id="contract-exness-fake",
+        exness_account_id=ACCOUNT,
+        gateway_url="http://gateway.test",
+        api_key=API_KEY,
+        private_key=SecretStr(fake.private_key_hex),
+        symbols=("EURUSD",),
+        symbol_suffix="m",
+        allow_insecure=True,
+        trust_env=False,
+        reconnect_initial_s=0.05,
+        ws_subprotocol=None,
+    )
+    broker = ExnessBroker(settings, clock=SystemClock(), http_transport=fake.transport)
+    return await _exness_harness(broker, "EURUSD", fake.stop)
+
+
+EXNESS_DEMO_REQUIRED = (
+    "EXNESS_DEMO_API_KEY",
+    "EXNESS_DEMO_ACCOUNT_ID",
+    "EXNESS_DEMO_GATEWAY_URL",
+    "EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT",
+)
+
+
+async def exness_demo_harness() -> ContractHarness:
+    """DEMO ONLY. Exness does not separate demo and real accounts by host, so the tests refuse to run
+    unless EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes declares that EXNESS_DEMO_ACCOUNT_ID is a demo account."""
+    env = demo_env()
+    missing = [k for k in EXNESS_DEMO_REQUIRED if not env.get(k)]
+    if not env.get("EXNESS_DEMO_PRIVATE_KEY") and not env.get("EXNESS_DEMO_PRIVATE_KEY_FILE"):
+        missing.append("EXNESS_DEMO_PRIVATE_KEY or EXNESS_DEMO_PRIVATE_KEY_FILE")
+    if missing:
+        pytest.skip(f"Exness demo credentials missing: {', '.join(missing)}")
+    if env["EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT"].strip().lower() != "yes":
+        pytest.skip("set EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes only if the account is a DEMO account")
+    from trader.brokers.registry import BrokerDeps, default_registry
+    from trader.config.settings import AccountConfig
+
+    symbol = env.get("EXNESS_DEMO_SYMBOL", "EURUSD")
+    account = AccountConfig.model_validate(
+        {
+            "id": "contract-exness-demo",
+            "broker": "exness",
+            "environment": "demo",
+            "account_id": env["EXNESS_DEMO_ACCOUNT_ID"],
+            "secrets_ref": "EXNESS_DEMO",
+            "symbols": [symbol],
+            "exness": {
+                "gateway_url": env["EXNESS_DEMO_GATEWAY_URL"],
+                "symbol_suffix": env.get("EXNESS_DEMO_SYMBOL_SUFFIX", ""),
+            },
+        }
+    )
+    broker = default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
+    assert isinstance(broker, ExnessBroker)
+
+    async def nothing() -> None:
+        return None
+
+    return await _exness_harness(broker, symbol, nothing)
+
+
 HARNESSES: dict[str, Callable[[], Awaitable[ContractHarness]]] = {
+    "exness-fake": exness_fake_harness,
+    "exness-demo": exness_demo_harness,
     "paper": paper_harness,
     "ctrader-fake": ctrader_fake_harness,
     "ctrader-demo": ctrader_demo_harness,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from decimal import ROUND_CEILING, Decimal
 
@@ -55,4 +56,42 @@ class TokenBucket:
     async def acquire(self, n: int = 1) -> None:
         """Wait until ``n`` tokens are available, then take them."""
         while (wait_ms := self.try_acquire(n)) > 0:
+            await self._sleep(wait_ms / 1000)
+
+
+class SlidingWindow:
+    """At most ``limit`` acquisitions in any ``window_s``-second window (exact, unlike a token bucket,
+    which can allow up to 2x ``limit`` inside one window). For brokers that publish "N per window" limits."""
+
+    __slots__ = ("_events", "_now_ns", "_sleep", "limit", "window_ns")
+
+    def __init__(
+        self,
+        limit: int,
+        window_s: Decimal,
+        *,
+        now_ns: Callable[[], int] = time.monotonic_ns,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if limit <= 0 or window_s <= 0:
+            raise ValueError("limit and window must be > 0")
+        self.limit = limit
+        self.window_ns = int(window_s * _NS)
+        self._now_ns = now_ns
+        self._sleep = sleep
+        self._events: deque[int] = deque()
+
+    def try_acquire(self) -> int:
+        """Record one request and return 0, or return the wait in ms until one is allowed."""
+        now = self._now_ns()
+        while self._events and now - self._events[0] >= self.window_ns:
+            self._events.popleft()
+        if len(self._events) < self.limit:
+            self._events.append(now)
+            return 0
+        wait_ns = self.window_ns - (now - self._events[0])
+        return max(1, -(-wait_ns // 1_000_000))
+
+    async def acquire(self) -> None:
+        while (wait_ms := self.try_acquire()) > 0:
             await self._sleep(wait_ms / 1000)

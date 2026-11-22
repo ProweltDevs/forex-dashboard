@@ -67,6 +67,15 @@ class CTraderOptions(_Model):
     use_tls: bool = True
 
 
+class ExnessOptions(_Model):
+    """Exness-specific account options. Credentials come from ``secrets_ref`` env vars, not from here."""
+
+    gateway_url: str = Field(pattern=r"^https://[^/?#\s]+/?$")  # from the DNS widget in Key Management
+    symbol_suffix: str = ""  # e.g. "m" when instruments are named "EURUSDm"
+    symbol_aliases: dict[str, str] = Field(default_factory=dict)  # broker instrument name -> canonical
+    hedging: bool = True
+
+
 class AccountConfig(_Model):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     broker: BrokerName
@@ -76,6 +85,7 @@ class AccountConfig(_Model):
     symbols: tuple[str, ...] = ()
     paper: PaperConfig | None = None
     ctrader: CTraderOptions | None = None
+    exness: ExnessOptions | None = None
 
     @field_validator("secrets_ref")
     @classmethod
@@ -97,7 +107,7 @@ class AccountConfig(_Model):
     @model_validator(mode="after")
     def _check_broker_fields(self) -> Self:
         # Each broker-specific options block is only valid for its own broker.
-        for key in ("paper", "ctrader"):
+        for key in ("paper", "ctrader", "exness"):
             if getattr(self, key) is not None and self.broker != key:
                 raise ValueError(f"'{key}' settings are only valid for broker: {key}")
         if self.broker == "paper":
