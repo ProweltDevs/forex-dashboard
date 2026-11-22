@@ -1,6 +1,8 @@
-# Local PostgreSQL 16 for `trader run` (phase 9). Matches TRADER_DB_URL in .env.example; change the
-# password in both places. The app container itself arrives with ops hardening (phase 11).
-#   docker compose up -d postgres
+# Local or VPS stack: PostgreSQL 16 + the trading process (docs/runbook.md).
+#   docker compose up -d --build            # paper mode on the synthetic feed (config/docker.yaml)
+#   docker compose logs -f app
+#   docker compose stop app                 # SIGTERM: graceful shutdown (pause, settle, persist)
+# Secrets come from .env (env_file). Change the database password here and in TRADER_DB_URL.
 services:
   postgres:
     image: postgres:16.4
@@ -18,5 +20,41 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    image: ${TRADER_IMAGE:-trader:local}
+    # TRADER_CONFIG picks the config (e.g. config/demo-docker.yaml). Live trading needs TRADER_MODE=live and
+    # --confirm-live: only through an override file (docs/runbook.md), never by editing this one.
+    command: ["run", "--config", "${TRADER_CONFIG:-config/docker.yaml}"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TRADER_DB_URL: postgresql+asyncpg://trader:change-me@postgres:5432/trader
+      # env_file makes .env part of the process environment, but TRADER_MODE must never come from .env
+      # (a live gate). Pinned empty here; only docker-compose.live.yml sets it (docs/runbook.md).
+      TRADER_MODE: ""
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - trader-data:/app/data
+      - ./config:/app/config:ro
+    ports:
+      - "127.0.0.1:9108:9108"   # ops: /metrics, /health (never publish on a public interface)
+      - "127.0.0.1:8700:8700"   # Control API, when api.enabled (put a TLS reverse proxy in front)
+    init: true
+    stop_signal: SIGTERM
+    stop_grace_period: 60s      # in-flight orders settle (10 s) + persistence flush; then SIGKILL
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: "50m", max-file: "10"}
+
 volumes:
   pgdata:
+  trader-data:

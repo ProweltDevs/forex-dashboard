@@ -1,0 +1,41 @@
+# Container config (docker compose, docs/runbook.md). Paper mode on the synthetic feed, with PostgreSQL and
+# the ops endpoints. Copy it (e.g. to config/demo-docker.yaml) and edit for a demo account; secrets come
+# from .env through compose's env_file, never from this file.
+mode: paper
+data_dir: /app/data
+logging:
+  level: INFO
+  json: true
+market_data:
+  timeframes: [M1, M5, M15]
+  warmup_bars: 300
+  recorder: {enabled: true, batch_size: 5000, flush_interval_s: 10}
+# TRADER_DB_URL is set by docker-compose.yml (host "postgres"). Trading continues if it is down (WAL buffer).
+database:
+  url_env: TRADER_DB_URL
+  pool_size: 5
+# 0.0.0.0 inside the container; docker-compose.yml publishes it on the host's 127.0.0.1 only.
+ops:
+  enabled: true
+  host: 0.0.0.0
+  port: 9108
+api:
+  enabled: false                 # true needs TRADER_API_TOKEN in .env; also published on 127.0.0.1 only
+  host: 0.0.0.0
+  port: 8700
+accounts:
+  - id: paper-main
+    broker: paper
+    symbols: [EURUSD, GBPUSD]
+    paper:
+      starting_balance: "10000"
+      currency: USD
+      leverage: 100
+      synthetic_feed: {seed: 1, tick_interval_ms: 250}
+strategies:
+  - id: ema-cross-eurusd-m5
+    class: ema_cross
+    account: paper-main
+    symbols: [EURUSD]
+    timeframes: [M5]
+    params: {fast: 12, slow: 26, atr_period: 14, atr_stop: "2", atr_target: "3", risk_pct: "0.5"}
