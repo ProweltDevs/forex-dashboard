@@ -16,7 +16,7 @@ from trader.brokers.paper import FakeTickSource, PaperBroker, PaperSettings
 from trader.domain import Bar, Instrument, Order, OrderIntent, OrderType, Position, Side, Timeframe
 from trader.domain.errors import InvalidVolume, Requote, UnknownOrderState
 from trader.domain.events import DomainEvent
-from trader.domain.models import AccountState, BrokerSnapshot, OrderRequest
+from trader.domain.models import AccountState, BrokerSnapshot, Fill, OrderRequest
 from trader.domain.time import SystemClock
 from trader.oms import AccountRuntime, MemoryStore, OmsSettings, OmsStore, OrderManager
 from trader.risk.gate import AccountView, ApproveAll, RiskGate, RiskVerdict
@@ -89,6 +89,9 @@ class ScriptedBroker:
 
     async def snapshot(self) -> BrokerSnapshot:
         return await self.inner.snapshot()
+
+    async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+        return await self.inner.deal_history(start, end)
 
     async def find_order(self, client_order_id: str, since: datetime) -> Order | None:
         self.lookups.append(client_order_id)

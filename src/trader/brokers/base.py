@@ -17,6 +17,7 @@ from trader.domain.models import (
     AccountState,
     Bar,
     BrokerSnapshot,
+    Fill,
     Instrument,
     Order,
     OrderRequest,
@@ -129,6 +130,11 @@ class Broker(Protocol):
     async def positions(self) -> list[Position]: ...
     async def open_orders(self) -> list[Order]: ...
     async def snapshot(self) -> BrokerSnapshot: ...
+    async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+        """Trade deals (fills) executed in [start, end), oldest first: the source of truth for realized P&L.
+        Balance operations (deposits, withdrawals, fees) are not fills and are not returned."""
+        ...
+
     async def find_order(self, client_order_id: str, since: datetime) -> Order | None:
         """Targeted reconcile: the broker's view of an order we sent (open or finished since ``since``),
         or None if the broker has no such order. Used to resolve UNKNOWN submits after timeouts/restarts."""

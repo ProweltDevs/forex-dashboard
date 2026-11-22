@@ -116,3 +116,29 @@ persisted. Each run prints a summary and writes `data/reports/run-<ts>.json`. It
 strategy raised an error. To trade paper on real prices, set `paper.market_data_from` to a demo account
 in the same config; that account is used for prices only.
 
+
+## P&L and analytics
+
+Realized P&L comes from broker deals. A per-account fill ledger is backfilled from the broker's deal
+history on start and after every reconnect. On top of it:
+- unrealized P&L per tick, an equity curve with high-water mark and drawdown;
+- a drift check against broker equity;
+- a trade journal (round trips with MAE/MFE and R multiple);
+- execution quality (slippage and latency percentiles per broker, symbol and hour);
+- performance metrics and daily reports.
+
+See [ADR 0010](docs/adr/0010-portfolio-and-analytics.md).
+
+Rebuild a day's report (JSON + CSV) from the stored books:
+
+```bash
+uv run trader report --config config/demo.yaml --account ctrader-demo --date 2026-11-20
+```
+
+Check our P&L against the broker's statement for a day (read-only; exits 1 on any mismatch):
+
+```bash
+uv run trader pnl-check --config config/demo.yaml --account ctrader-demo --date 2026-11-20
+```
+
+Demo acceptance: `uv run pytest -m demo tests/contract/test_pnl_demo.py -s` (the account must start flat).

@@ -404,6 +404,12 @@ class Fill:
     commission: Decimal = ZERO  # account currency; negative = cost
     swap: Decimal = ZERO  # account currency
     realized_pnl: Decimal | None = None  # gross, account currency, for closing deals
+    balance_after: Decimal | None = None  # account balance right after this deal, when the broker reports it
+
+    @property
+    def net(self) -> Decimal:
+        """What this deal did to the balance: realized gross + commission + swap (costs are negative)."""
+        return (self.realized_pnl or ZERO) + self.commission + self.swap
 
     def __post_init__(self) -> None:
         require_positive("volume", self.volume)
@@ -412,6 +418,8 @@ class Fill:
         require_decimal("swap", self.swap)
         if self.realized_pnl is not None:
             require_decimal("realized_pnl", self.realized_pnl)
+        if self.balance_after is not None:
+            require_decimal("balance_after", self.balance_after)
         _require_utc("ts", self.ts)
 
 

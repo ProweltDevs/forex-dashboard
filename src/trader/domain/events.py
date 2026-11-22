@@ -120,6 +120,29 @@ class RiskStateEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class OrderRetryEvent:
+    """The OMS resent an order with the same client_order_id after a retryable error (requote, rate limit,
+    broker unavailable). Feeds execution-quality stats (requote rate)."""
+
+    account_id: str
+    client_order_id: str
+    attempt: int  # the attempt that failed (1 = the first send)
+    error: str  # error class name, e.g. "Requote"
+    ts: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AlertEvent:
+    """Something an operator should look at (phase 10 sends these as notifications)."""
+
+    account_id: str
+    kind: str  # e.g. equity_drift, balance_mismatch
+    severity: str  # info | warning | critical
+    message: str
+    ts: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StrategyEvent:
     strategy_id: str
     kind: str  # e.g. "started", "paused", "error", "slow_callback"
@@ -140,4 +163,6 @@ type DomainEvent = (
     | RiskEvent
     | RiskStateEvent
     | StrategyEvent
+    | OrderRetryEvent
+    | AlertEvent
 )

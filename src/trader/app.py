@@ -15,9 +15,11 @@ import contextlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from trader.analytics.books import AccountBooks, build_books, load_offline
+from trader.analytics.statement import StatementCheck, compare, day_window
 from trader.brokers.base import Broker, MarketDataSource
 from trader.brokers.feeds import BrokerFeed, SyntheticFeed
 from trader.brokers.registry import BrokerDeps, BrokerRegistry, default_registry
@@ -183,7 +185,11 @@ class RunReport:
                 + (f" ({st['pause_reason']})" if st["pause_reason"] else "")
             )
         for acc in self.accounts:
-            out.append(f"  account {acc['id']}: kill={acc['kill_level']} positions={acc['positions']}")
+            out.append(
+                f"  account {acc['id']}: kill={acc['kill_level']} positions={acc['positions']} "
+                f"realized_today={acc.get('realized_today')} trades_closed={acc.get('trades_closed')} "
+                f"equity={acc.get('equity')} drawdown={acc.get('drawdown')}"
+            )
             out.append(f"    orders by status: {acc['orders']}")
         out.append(f"  strategy errors: {self.strategy_errors}")
         return out
@@ -210,6 +216,9 @@ class App:
         self.feeds: dict[str, BrokerFeed | SyntheticFeed] = {}
         self.accounts: dict[str, AccountServices] = {}
         self.runner: StrategyRunner | None = None
+        self.books: dict[str, AccountBooks] = {}
+        self._report_day: dict[str, date] = {}
+        self._reporter: asyncio.Task[None] | None = None
         self._started: datetime | None = None
 
     def _sources(self) -> set[str]:
@@ -256,6 +265,19 @@ class App:
             )
             await services.runtime.start(warm_up=True)
             self.accounts[acc.id] = services
+            books = build_books(
+                self.config,
+                acc,
+                services.oms,
+                services.broker,
+                services.broker.name,
+                self._clock,
+                ticks=self.market.ticks,
+            )
+            await asyncio.to_thread(books.journal.load)  # closed trades first: the ledger replay skips them
+            await books.portfolio.start()
+            self.books[acc.id] = books
+            self._report_day[acc.id] = books.portfolio.ledger_day(self._clock.now())
         self.runner = StrategyRunner(
             self.market,
             {aid: s.oms for aid, s in self.accounts.items()},
@@ -280,6 +302,7 @@ class App:
             )
         await self.runner.run()
         await self.runner.start_all()
+        self._reporter = asyncio.create_task(self._daily_reports(), name="daily-reports")
         _log.info("app_started", accounts=sorted(self.accounts), strategies=sorted(self.runner.handles))
 
     async def _paper_source(self, acc: AccountConfig) -> BrokerFeed | SyntheticFeed:
@@ -312,6 +335,13 @@ class App:
         if runner is not None:
             await runner.stop_all()
             await runner.close()
+        if self._reporter is not None:
+            self._reporter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reporter
+        for aid, books in self.books.items():
+            await books.portfolio.stop()
+            await books.write_report(self.config.data_dir, self._report_day[aid])  # today so far
         for services in self.accounts.values():
             await services.runtime.stop()
         for feed in self.feeds.values():
@@ -335,6 +365,21 @@ class App:
                 "shutdown_orders_still_in_flight", detail="they stay persisted and resolve on restart"
             )
 
+    async def _daily_reports(self) -> None:
+        """At each trading-day rollover, write the finished day's report for every account."""
+        while True:
+            await asyncio.sleep(30)
+            now = self._clock.now()
+            for aid, books in self.books.items():
+                today = books.portfolio.ledger_day(now)
+                if today != self._report_day[aid]:
+                    await books.portfolio.flush()
+                    paths = await books.write_report(self.config.data_dir, self._report_day[aid])
+                    _log.info(
+                        "daily_report", account=aid, day=self._report_day[aid].isoformat(), files=len(paths)
+                    )
+                    self._report_day[aid] = today
+
     def report(self) -> RunReport:
         strategies: list[dict[str, JsonValue]] = []
         if self.runner is not None:
@@ -357,14 +402,24 @@ class App:
             by_status: dict[str, int] = {}
             for o in s.oms.orders():
                 by_status[str(o.status)] = by_status.get(str(o.status), 0) + 1
-            accounts.append(
-                {
-                    "id": aid,
-                    "kill_level": str(s.oms.risk_level),
-                    "positions": len(s.oms.positions()),
-                    "orders": dict(sorted(by_status.items())),
+            entry: dict[str, JsonValue] = {
+                "id": aid,
+                "kill_level": str(s.oms.risk_level),
+                "positions": len(s.oms.positions()),
+                "orders": dict(sorted(by_status.items())),
+            }
+            books = self.books.get(aid)
+            if books is not None:
+                p = books.portfolio
+                point = p.sample(self._clock.now())
+                today = p.ledger_day(self._clock.now())
+                entry |= {
+                    "realized_today": str(p.ledger.realized(day=today).net),
+                    "trades_closed": len(books.journal.closed),
+                    "equity": None if point is None else str(point.equity),
+                    "drawdown": None if point is None else str(point.drawdown),
                 }
-            )
+            accounts.append(entry)
         return RunReport(
             started=self._started or self._clock.now(), stopped=None, strategies=strategies, accounts=accounts
         )
@@ -385,3 +440,25 @@ async def run_app(app: App, stop: asyncio.Event, duration: timedelta | None = No
         write_atomic, reports / f"run-{stamp}.json", json.dumps(report.to_json(), indent=2)
     )
     return report
+
+
+async def run_pnl_check(
+    config: AppConfig,
+    account: AccountConfig,
+    day: date,
+    *,
+    env: Mapping[str, str],
+    clock: Clock,
+    registry: BrokerRegistry | None = None,
+) -> StatementCheck:
+    """``trader pnl-check``: the broker's deals for ``day`` vs our stored ledger. Read-only: connects,
+    fetches the deal history and disconnects; never sends an order."""
+    deps = BrokerDeps(clock=clock, env=env, data_dir=config.data_dir)
+    broker = (registry or default_registry()).create(account, deps)
+    await broker.connect()
+    try:
+        broker_fills = await broker.deal_history(*day_window(day, account.risk.day_offset_minutes))
+    finally:
+        await broker.close()
+    ledger = (await asyncio.to_thread(load_offline, config.data_dir, account)).ledger
+    return compare(day, [e.fill for e in ledger.entries(day=day)], broker_fills)

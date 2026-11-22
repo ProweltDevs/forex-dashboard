@@ -51,6 +51,7 @@ from trader.domain.events import (
     DomainEvent,
     FillEvent,
     OrderEvent,
+    OrderRetryEvent,
     PositionEvent,
     ReconcileEvent,
     RiskEvent,
@@ -575,6 +576,15 @@ class OrderManager:
             if isinstance(exc, RateLimited) and exc.retry_after_ms:
                 delay = max(delay, timedelta(milliseconds=exc.retry_after_ms))
             _log.warning("oms_submit_retry", cid=cid, attempt=tracked.attempts, error=repr(exc))
+            self._publish(
+                OrderRetryEvent(
+                    account_id=self._s.account_id,
+                    client_order_id=cid,
+                    attempt=tracked.attempts,
+                    error=type(exc).__name__,
+                    ts=now,
+                )
+            )
             self._later(delay, lambda: self._resend(cid))
             return
         self._reject(tracked, f"{type(exc).__name__}: {exc}")

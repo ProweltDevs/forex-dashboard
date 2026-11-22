@@ -51,6 +51,7 @@ from trader.domain.events import (
     TickEvent,
 )
 from trader.domain.fx import conversion_rate
+from trader.domain.ids import new_client_order_id
 from trader.domain.models import (
     AccountState,
     Bar,
@@ -124,7 +125,10 @@ class PaperBroker:
         self._positions: dict[str, Position] = {}
         self._rates: dict[tuple[str, str], Decimal] = {}
         self._balance = settings.starting_balance
+        self._fills: list[Fill] = []
         self._ids = itertools.count(1)
+        # Ids must stay unique across process restarts (the fill ledger and journal dedupe by id).
+        self._run = new_client_order_id()[-6:].lower()
 
         self._events: asyncio.Queue[DomainEvent | None] = asyncio.Queue()
         self._events_consumed = False
@@ -291,7 +295,7 @@ class PaperBroker:
         self._ensure_conversions(inst)
 
         now = self._now()
-        broker_id = f"PO{next(self._ids)}"
+        broker_id = f"PO{self._run}-{next(self._ids)}"
         order = _advance(replace(Order.new(req, now), broker_order_id=broker_id), OrderStatus.ACCEPTED, now)
         self._orders[broker_id] = order
         self._by_client_id[req.client_order_id] = broker_id
@@ -448,7 +452,7 @@ class PaperBroker:
         commission = self._settings.commission_per_lot * volume
         self._balance -= commission
         pos = Position(
-            position_id=f"PP{next(self._ids)}",
+            position_id=f"PP{self._run}-{next(self._ids)}",
             symbol=req.symbol,
             side=req.side,
             volume=volume,
@@ -481,9 +485,9 @@ class PaperBroker:
         self._balance += gross + swap - commission
 
         fill = Fill(
-            fill_id=f"PD{next(self._ids)}",
+            fill_id=f"PD{self._run}-{next(self._ids)}",
             client_order_id=order.client_order_id if order else None,
-            broker_order_id=(order.broker_order_id or "") if order else f"PO{next(self._ids)}",
+            broker_order_id=(order.broker_order_id or "") if order else f"PO{self._run}-{next(self._ids)}",
             position_id=pos.position_id,
             symbol=pos.symbol,
             side=pos.side.opposite,
@@ -494,7 +498,7 @@ class PaperBroker:
             swap=swap,
             realized_pnl=gross,
         )
-        self._emit_trade(FillEvent(account_id=self._settings.account_id, fill=fill, ts=ts))
+        self._record_fill(fill, ts)
         if volume == pos.volume:
             del self._positions[pos.position_id]
             self._emit_trade(self._position_event(replace(pos, unrealized_pnl=ZERO), PositionChange.CLOSED))
@@ -789,7 +793,7 @@ class PaperBroker:
         commission: Decimal,
     ) -> None:
         fill = Fill(
-            fill_id=f"PD{next(self._ids)}",
+            fill_id=f"PD{self._run}-{next(self._ids)}",
             client_order_id=order.client_order_id,
             broker_order_id=order.broker_order_id or "",
             position_id=position_id,
@@ -800,7 +804,17 @@ class PaperBroker:
             ts=ts,
             commission=commission,
         )
+        self._record_fill(fill, ts)
+
+    def _record_fill(self, fill: Fill, ts: datetime) -> None:
+        """Every deal is kept (``deal_history``) with the balance it left, like a broker statement."""
+        fill = replace(fill, balance_after=self._balance)
+        self._fills.append(fill)
         self._emit_trade(FillEvent(account_id=self._settings.account_id, fill=fill, ts=ts))
+
+    async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+        self._request()
+        return [f for f in self._fills if start <= f.ts < end]
 
     def _position_event(self, pos: Position, change: PositionChange) -> PositionEvent:
         return PositionEvent(
