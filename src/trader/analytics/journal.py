@@ -191,6 +191,7 @@ class TradeJournal(Listener):
         self.open: dict[str, _Open] = {}
         self.closed: list[TradeRecord] = []
         self._closed_ids: set[str] = set()
+        self.on_closed: list[Callable[[TradeRecord], None]] = []  # e.g. the database writer
         self._ticks: dict[str, Tick] = {}
         self._notes: dict[str, list[str]] = {}
         self._pending: list[str] = []
@@ -301,6 +302,8 @@ class TradeJournal(Listener):
         self.closed.append(record)
         self._closed_ids.add(record.trade_id)
         self._pending.append(json.dumps(record.to_json(), separators=(",", ":")))
+        for callback in self.on_closed:
+            callback(record)
 
     def _rate(self, inst: Instrument | None) -> Decimal | None:
         ccy = self._currency()

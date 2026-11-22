@@ -142,3 +142,25 @@ uv run trader pnl-check --config config/demo.yaml --account ctrader-demo --date 
 ```
 
 Demo acceptance: `uv run pytest -m demo tests/contract/test_pnl_demo.py -s` (the account must start flat).
+
+## Database
+
+PostgreSQL holds the event store and query tables: orders, fills, positions, trades, risk and reconcile
+events, and the audit log. See [ADR 0011](docs/adr/0011-persistence.md). It is optional: without a
+`database:` block in the config, everything still runs on the local files.
+
+Start a local server:
+
+```bash
+docker compose up -d postgres
+```
+
+Set the URL in `.env`:
+
+```bash
+TRADER_DB_URL=postgresql+asyncpg://trader:change-me@localhost:5432/trader
+```
+
+`trader run` migrates the schema on its first connection; you can also run `uv run alembic upgrade head`.
+If the database goes down, trading continues and records are buffered to `data/wal/db.wal`. They are
+replayed when the database is back, and the outage is reported as `db_down` / `db_recovered` alerts.

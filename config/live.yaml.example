@@ -4,6 +4,11 @@ mode: live
 logging:
   level: INFO
   json: true
+# PostgreSQL event store + projections (ADR 0011). The URL comes from TRADER_DB_URL (.env), never from here.
+# Remove this block to run on files only (the JSON/JSONL books under data_dir are always written).
+database:
+  url_env: TRADER_DB_URL
+  pool_size: 5
 accounts:
   - id: ctrader-live
     broker: ctrader

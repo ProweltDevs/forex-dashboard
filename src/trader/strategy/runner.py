@@ -181,6 +181,7 @@ class StrategyRunner:
         self._dirty: dict[str, str] = {}
         self._dirty_event = asyncio.Event()
         self._write_lock = asyncio.Lock()
+        self.on_state_saved: list[Callable[[str, str], None]] = []  # (strategy_id, state JSON)
 
     # ================================================================== lifecycle
 
@@ -488,6 +489,9 @@ class StrategyRunner:
                 except OSError as exc:
                     _log.error("strategy_state_save_failed", strategy=sid, error=str(exc))
                     self._dirty.setdefault(sid, text)
+                    continue
+                for callback in self.on_state_saved:
+                    callback(sid, text)
 
     def _event(self, strategy_id: str, kind: str, message: str) -> None:
         self.events.publish(

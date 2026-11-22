@@ -1,0 +1,6 @@
+Alembic migrations for the trader PostgreSQL schema (src/trader/persistence/schema.py).
+
+    TRADER_DB_URL=postgresql+asyncpg://user@host/trader uv run alembic upgrade head
+    TRADER_DB_URL=... uv run alembic revision --autogenerate -m "describe the change"
+
+`trader run` also upgrades to head on its first successful database connection.

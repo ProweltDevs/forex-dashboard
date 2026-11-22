@@ -1,0 +1,22 @@
+# Local PostgreSQL 16 for `trader run` (phase 9). Matches TRADER_DB_URL in .env.example; change the
+# password in both places. The app container itself arrives with ops hardening (phase 11).
+#   docker compose up -d postgres
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: trader
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  pgdata:
