@@ -9,6 +9,23 @@ logging:
 database:
   url_env: TRADER_DB_URL
   pool_size: 5
+# Control API (SPEC §13, docs/api/README.md): REST + the /stream WebSocket, for the UI and scripts.
+# Bearer token from TRADER_API_TOKEN (.env, at least 32 characters). Localhost only: put a TLS reverse proxy
+# in front if you need it elsewhere. Every mutating call is written to the audit log.
+api:
+  enabled: false               # true + TRADER_API_TOKEN to control the process remotely
+  host: 127.0.0.1
+  port: 8700
+  stream_tick_interval_ms: 500   # per-client tick throttle on /stream
+# Notifications (SPEC §14, docs/notifications.md). Telegram is primary, email optional. Secrets from .env:
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (a private chat with your bot), TRADER_SMTP_USER/PASSWORD.
+notify:
+  telegram: {min_severity: info, commands: true}       # commands: /status /pnl /pause /kill
+  # email: {host: smtp.example.com, port: 587, sender: trader@example.com, recipients: [me@example.com],
+  #         min_severity: warning}
+  dedupe_s: 300                  # the same alert within 5 min is sent once
+  rate_per_min: 20               # per channel; extras are summarised (critical alerts always go out)
+  fills: true                    # a message per fill (SL/TP hits and closes are always sent)
 accounts:
   - id: ctrader-live
     broker: ctrader

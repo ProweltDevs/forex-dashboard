@@ -164,3 +164,23 @@ TRADER_DB_URL=postgresql+asyncpg://trader:change-me@localhost:5432/trader
 `trader run` migrates the schema on its first connection; you can also run `uv run alembic upgrade head`.
 If the database goes down, trading continues and records are buffered to `data/wal/db.wal`. They are
 replayed when the database is back, and the outage is reported as `db_down` / `db_recovered` alerts.
+
+## Control API and notifications
+
+`trader run` can serve a REST + WebSocket Control API for the future UI and scripts, and send alerts to
+Telegram (with `/status`, `/pnl`, `/pause`, `/kill` commands) and email. See [ADR 0012](docs/adr/0012-control-api-and-notifications.md),
+[the API guide](docs/api/README.md) and [notifications](docs/notifications.md).
+
+```yaml
+api: {enabled: true}                          # 127.0.0.1:8700, token from TRADER_API_TOKEN
+notify: {telegram: {commands: true}}          # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+```
+
+```bash
+curl -H "Authorization: Bearer $TRADER_API_TOKEN" http://127.0.0.1:8700/accounts
+uv run trader openapi --out docs/api/openapi.json   # regenerate the API contract
+```
+
+Manual orders from the API go through the same risk checks as strategy orders, and every mutating call is
+recorded in the audit log (`GET /audit`, `data/audit/audit.jsonl`).
+

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import signal
@@ -58,6 +59,8 @@ def _parser() -> argparse.ArgumentParser:
     auth.add_argument("--redirect-uri", default=None, help="must match a redirect URI of your cTrader app")
     auth.add_argument("--proxy", default=None, help="http://host:port CONNECT proxy, if required")
     sub.add_parser("secrets-key", help="generate TRADER_SECRETS_KEY in .env if it is missing")
+    oa = sub.add_parser("openapi", help="print the Control API's OpenAPI schema (the UI contract)")
+    oa.add_argument("--out", type=Path, default=None, help="write to this file instead of stdout")
     kill = sub.add_parser(
         "kill", help="kill switch for one account: block entries, cancel pending orders, flatten (or reset)"
     )
@@ -227,6 +230,8 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         return _secrets_key(args.env_file, merged)
     if args.command == "ctrader-auth":
         return _ctrader_auth(args, merged)
+    if args.command == "openapi":
+        return _openapi(args.out)
     try:
         config = load_config(args.config)
         # TRADER_MODE only counts when it is set in the real process environment, never from .env.
@@ -258,6 +263,19 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         print(live_banner(config), file=sys.stderr)
     log.info("startup", mode=str(mode), accounts=[a.id for a in config.accounts], version=__version__)
     return _run(config, merged, args.duration)
+
+
+def _openapi(out: Path | None) -> int:
+    from trader.api.routes import openapi_schema
+
+    text = json.dumps(openapi_schema(), indent=2, sort_keys=True) + "\n"
+    if out is None:
+        sys.stdout.write(text)
+    else:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+        print(f"wrote {out}")
+    return 0
 
 
 def _run(config: AppConfig, env: Mapping[str, str], duration: timedelta | None) -> int:
