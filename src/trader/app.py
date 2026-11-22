@@ -22,21 +22,28 @@ from pathlib import Path
 from trader.analytics.books import AccountBooks, build_books, load_offline, params_hash
 from trader.analytics.journal import TradeRecord
 from trader.analytics.statement import StatementCheck, compare, day_window
+from trader.api.control import Control
+from trader.api.server import ApiServer, api_token
 from trader.brokers.base import Broker, MarketDataSource
 from trader.brokers.feeds import BrokerFeed, SyntheticFeed
 from trader.brokers.registry import BrokerDeps, BrokerRegistry, default_registry
 from trader.config.risk import RiskConfig
-from trader.config.settings import AccountConfig, AppConfig
+from trader.config.settings import AccountConfig, AppConfig, StrategyConfig
 from trader.domain.enums import KillLevel, OrderStatus
 from trader.domain.errors import ConfigError
 from trader.domain.jsontypes import JsonValue
+from trader.domain.models import Order
 from trader.domain.time import Clock
 from trader.marketdata.service import MarketDataService
+from trader.notify.notifier import Channel
+from trader.notify.service import Notifications
 from trader.observability.logging import get_logger
 from trader.oms import AccountRuntime, JsonFileStore, OmsSettings, OrderManager
+from trader.persistence.audit import AuditLog, audit_path
 from trader.persistence.files import write_atomic
 from trader.persistence.service import Persistence
 from trader.risk.engine import RiskEngine
+from trader.strategy.base import StrategyStatus
 from trader.strategy.registry import resolve
 from trader.strategy.runner import StrategyRunner, StrategySpec, StrategyStateStore
 
@@ -209,10 +216,12 @@ class App:
         clock: Clock,
         registry: BrokerRegistry | None = None,
         settle_timeout: timedelta = timedelta(seconds=10),
+        notify_channels: list[Channel] | None = None,  # replaces the configured channels (tests)
     ) -> None:
         self.config = config
         self._env = env
         self._clock = clock
+        self.clock = clock
         self._registry = registry or default_registry()
         self._settle_timeout = settle_timeout
         self.market = MarketDataService(config.market_data, clock, config.data_dir)
@@ -221,6 +230,12 @@ class App:
         self.runner: StrategyRunner | None = None
         self.persistence = Persistence.from_config(config, dict(env), clock)  # None without a database
         self.books: dict[str, AccountBooks] = {}
+        self.audit_log = AuditLog(audit_path(config.data_dir), clock, self.persistence)
+        self.strategy_configs: dict[str, StrategyConfig] = {st.id: st for st in config.strategies}
+        self.notifications = Notifications.from_config(config, env, clock, channels=notify_channels)
+        self.api: ApiServer | None = None
+        if config.api.enabled:
+            self.api = ApiServer(self, config.api, api_token(config.api, env))
         self._report_day: dict[str, date] = {}
         self._reporter: asyncio.Task[None] | None = None
         self._started: datetime | None = None
@@ -254,6 +269,10 @@ class App:
                         "broker_account": acc.account_id or None,
                     },
                 )
+        notes = self.notifications
+        if notes is not None:
+            await notes.start()
+            notes.set_order_lookup(self._order_of)
         await self.market.start()
         sources = self._sources()
         by_id = {a.id: a for a in self.config.accounts}
@@ -294,6 +313,9 @@ class App:
             await asyncio.to_thread(books.journal.load)  # closed trades first: the ledger replay skips them
             await books.portfolio.start()
             self.books[acc.id] = books
+            if notes is not None:
+                notes.attach(services.oms.events, acc.id)
+                notes.attach(books.portfolio.events, f"{acc.id}-alerts")
             if db is not None:
                 db.attach(services.oms.events, acc.id)
                 db.attach(books.portfolio.events, acc.id, name="persistence-alerts")
@@ -308,29 +330,100 @@ class App:
             StrategyStateStore(self.config.data_dir / "strategies"),
         )
         for st in self.config.strategies:
-            if not st.enabled:
-                continue
-            self.runner.add(
-                StrategySpec(
-                    id=st.id,
-                    cls=resolve(st.class_),
-                    params=st.params,
-                    account=st.account,
-                    symbols=st.symbols,
-                    timeframes=st.timeframes or self.config.market_data.timeframes[:1],
-                    max_errors=st.max_errors,
-                    callback_budget_ms=st.callback_budget_ms,
-                    seed=st.seed,
-                )
-            )
+            if st.enabled:
+                self.runner.add(self._spec(st))
         if db is not None:
             db.attach(self.runner.events, None, name="persistence-strategies")
             self.runner.on_state_saved.append(self._persist_state)
+        if notes is not None:
+            notes.attach(self.runner.events, "strategies")
+            notes.attach(self.market.feeds, "feeds")
+            if db is not None:
+                notes.attach(db.writer.events, "db")
         await self.runner.run()
         await self.runner.start_all()
         self._persist_strategies()
         self._reporter = asyncio.create_task(self._daily_reports(), name="daily-reports")
+        if self.api is not None:
+            await self.api.start()  # last: the API only ever sees a fully started app
+        if notes is not None:
+            tg = self.config.notify.telegram
+            if tg is not None and tg.commands:
+                await notes.enable_commands(Control(self, actor="telegram"))
+            notes.info("app:started", "Trader started", "\n".join(self._status_lines()))
         _log.info("app_started", accounts=sorted(self.accounts), strategies=sorted(self.runner.handles))
+
+    def _order_of(self, account_id: str, client_order_id: str) -> Order | None:
+        services = self.accounts.get(account_id)
+        return None if services is None else services.oms.order(client_order_id)
+
+    def _status_lines(self) -> list[str]:
+        lines = [
+            f"{aid} ({s.account.broker} {s.account.environment}): kill {s.oms.risk_level}, "
+            f"{len(s.oms.positions())} positions"
+            for aid, s in self.accounts.items()
+        ]
+        if self.runner is not None:
+            lines.append(
+                "strategies: "
+                + (", ".join(f"{sid} {status}" for sid, status, _r, _st in self.runner.status()) or "none")
+            )
+        return lines
+
+    def _spec(self, st: StrategyConfig) -> StrategySpec:
+        return StrategySpec(
+            id=st.id,
+            cls=resolve(st.class_),
+            params=st.params,
+            account=st.account,
+            symbols=st.symbols,
+            timeframes=st.timeframes or self.config.market_data.timeframes[:1],
+            max_errors=st.max_errors,
+            callback_budget_ms=st.callback_budget_ms,
+            seed=st.seed,
+        )
+
+    # ------------------------------------------------------------------ strategy management (Control API)
+
+    async def add_strategy(self, st: StrategyConfig, *, start: bool = True) -> None:
+        """Load a strategy that is not in the config file (it lasts until the process stops)."""
+        runner = self.runner
+        assert runner is not None
+        if st.account not in self.accounts:
+            raise ValueError(f"strategy {st.id!r}: unknown trading account {st.account!r}")
+        if st.id in runner.handles and runner.handles[st.id].status is not StrategyStatus.STOPPED:
+            raise ValueError(f"strategy {st.id!r} is already loaded")
+        missing = sorted(set(st.symbols) - set(self.accounts[st.account].account.symbols))
+        if missing:
+            raise ValueError(f"strategy {st.id!r}: {st.account} does not subscribe to {missing}")
+        runner.add(self._spec(st))
+        self.strategy_configs[st.id] = st
+        if start:
+            await runner.start(st.id)
+        self._persist_strategies()
+
+    async def restart_strategy(self, strategy_id: str) -> None:
+        """A STOPPED strategy as a new instance (its saved state carries over)."""
+        runner = self.runner
+        assert runner is not None
+        runner.add(self._spec(self.strategy_configs[strategy_id]))
+        await runner.start(strategy_id)
+        self._persist_strategies()
+
+    async def replace_strategy_params(self, strategy_id: str, params: dict[str, object]) -> None:
+        runner = self.runner
+        assert runner is not None
+        handle = runner.handles[strategy_id]
+        was, reason, by_risk = handle.status, handle.pause_reason, handle.paused_by_risk
+        st = self.strategy_configs[strategy_id].model_copy(update={"params": params})
+        if was is StrategyStatus.STOPPED:
+            runner.add(self._spec(st))  # LOADED with the new params; start it explicitly
+        else:
+            await runner.replace(strategy_id, params)
+            if was is StrategyStatus.PAUSED and not by_risk:
+                runner.pause(strategy_id, reason or "paused")
+        self.strategy_configs[strategy_id] = st
+        self._persist_strategies()
 
     async def _paper_source(self, acc: AccountConfig) -> BrokerFeed | SyntheticFeed:
         assert acc.paper is not None
@@ -353,6 +446,8 @@ class App:
 
     async def stop(self) -> RunReport:
         """Pause strategies, let in-flight orders settle, persist everything, disconnect."""
+        if self.api is not None:
+            await self.api.stop()  # first: no new commands during shutdown
         runner = self.runner
         if runner is not None:
             for sid in list(runner.handles):
@@ -374,6 +469,13 @@ class App:
         for feed in self.feeds.values():
             await feed.close()
         await self.market.stop()
+        if self.notifications is not None:
+            self.notifications.info(
+                "app:stopped",
+                "Trader stopped",
+                "\n".join([*self._status_lines(), f"strategy errors this run: {report.strategy_errors}"]),
+            )
+            await self.notifications.stop()
         if self.persistence is not None:
             self._persist_strategies()
             await self.persistence.stop()  # last: flushes to the database, or to the WAL if it is down
@@ -408,9 +510,8 @@ class App:
     def _persist_strategies(self) -> None:
         if self.persistence is None or self.runner is None:
             return
-        by_id = {s.id: s for s in self.config.strategies}
         for sid, status, _reason, _stats in self.runner.status():
-            st = by_id[sid]
+            st = self.strategy_configs[sid]
             cls = resolve(st.class_)
             self.persistence.put(
                 "strategy",
@@ -438,6 +539,10 @@ class App:
                     _log.info(
                         "daily_report", account=aid, day=self._report_day[aid].isoformat(), files=len(paths)
                     )
+                    if self.notifications is not None:
+                        self.notifications.daily_report(
+                            aid, self._report_day[aid], daily_lines(books, self._report_day[aid])
+                        )
                     self._report_day[aid] = today
 
     def report(self) -> RunReport:
@@ -485,9 +590,31 @@ class App:
         )
 
 
+def daily_lines(books: AccountBooks, day: date) -> list[str]:
+    """The daily-report notification: realized P&L, closed trades, equity."""
+    p = books.portfolio
+    pnl = p.ledger.realized(day=day)
+    trades = [t for t in books.journal.trades() if p.ledger_day(t.exit_time) == day]
+    wins = sum(1 for t in trades if t.net > 0)
+    lines = [
+        f"realized {pnl.net:.2f} (gross {pnl.gross:.2f}, costs {pnl.costs:.2f}, {pnl.deals} deals)",
+        f"trades closed {len(trades)}, won {wins}" + (f" ({wins * 100 // len(trades)}%)" if trades else ""),
+    ]
+    for (sid, sym), v in sorted(p.ledger.attribution(day).items()):
+        lines.append(f"  {sid} {sym}: {v.net:.2f}")
+    point = p.snapshot()
+    if point is not None:
+        lines.append(f"equity {point.equity:.2f}, drawdown {point.drawdown:.2f} ({point.drawdown_pct:.2f}%)")
+    return lines
+
+
 async def run_app(app: App, stop: asyncio.Event, duration: timedelta | None = None) -> RunReport:
     """Start, run until ``stop`` is set (signal) or ``duration`` elapses, then shut down gracefully."""
-    await app.start()
+    try:
+        await app.start()
+    except BaseException:  # e.g. the API port is taken: stop whatever already started, gracefully
+        await app.stop()
+        raise
     try:
         timeout = duration.total_seconds() if duration is not None else None
         with contextlib.suppress(TimeoutError):
@@ -535,13 +662,16 @@ async def audit(
     details: Mapping[str, object],
     result: str,
 ) -> None:
-    """Record a manual command in ``audit_log`` (SPEC §12). With the database down it lands in the WAL and
-    reaches the database with the next writer start. A no-op without a configured database."""
+    """Record a manual command (SPEC §12): in the local audit file always, and in ``audit_log`` when a
+    database is configured (with the database down it lands in the WAL and reaches the database with the
+    next writer start)."""
     persistence = Persistence.from_config(config, dict(env), clock)
-    if persistence is None:
-        return
-    await persistence.start()
-    persistence.put(
-        "audit", account_id, {"actor": actor, "action": action, "details": dict(details), "result": result}
-    )
-    await persistence.stop()
+    if persistence is not None:
+        await persistence.start()
+    try:
+        await AuditLog(audit_path(config.data_dir), clock, persistence).record(
+            actor=actor, action=action, account_id=account_id, details=details, result=result
+        )
+    finally:
+        if persistence is not None:
+            await persistence.stop()

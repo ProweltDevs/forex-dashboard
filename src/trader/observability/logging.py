@@ -23,6 +23,7 @@ _SENSITIVE_VALUE = [
     re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),  # JWT
+    re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}"),  # Telegram bot token (also inside a /bot<token>/ URL)
 ]
 _MAX_DEPTH = 8
 

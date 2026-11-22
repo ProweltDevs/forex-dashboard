@@ -230,6 +230,48 @@ class PortfolioConfig(_Model):
         return timedelta(seconds=self.balance_grace_s)
 
 
+class ApiConfig(_Model):
+    """Control API (SPEC §13). Localhost by default: expose it only behind a TLS reverse proxy."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(default=8700, ge=0, le=65535)  # 0: any free port (tests)
+    token_env: str = "TRADER_API_TOKEN"  # bearer token, from the environment only
+    stream_tick_interval_ms: int = Field(default=500, ge=50)  # per-client tick throttle on /stream
+
+
+type SeverityName = Literal["info", "warning", "critical"]
+
+
+class TelegramConfig(_Model):
+    token_env: str = "TELEGRAM_BOT_TOKEN"
+    chat_id_env: str = "TELEGRAM_CHAT_ID"  # a private chat: commands are refused from groups
+    api_base: str = "https://api.telegram.org"  # or a self-hosted Bot API server
+    min_severity: SeverityName = "info"
+    commands: bool = False  # accept /status /pnl /pause /kill from that chat
+
+
+class EmailConfig(_Model):
+    host: str
+    port: int = Field(default=587, ge=1, le=65535)
+    starttls: bool = True
+    sender: str
+    recipients: tuple[str, ...]
+    user_env: str = "TRADER_SMTP_USER"
+    password_env: str = "TRADER_SMTP_PASSWORD"
+    min_severity: SeverityName = "warning"
+
+
+class NotifyConfig(_Model):
+    """Notifications (SPEC §14): Telegram (primary) and email (optional)."""
+
+    telegram: TelegramConfig | None = None
+    email: EmailConfig | None = None
+    dedupe_s: int = Field(default=300, ge=0)  # same alert key within this window: sent once
+    rate_per_min: int = Field(default=20, ge=1)  # per channel; extras are summarised later
+    fills: bool = True  # notify every fill (off for very active strategies)
+
+
 class AppConfig(_Model):
     mode: TradingMode = TradingMode.PAPER
     data_dir: Path = Path("data")
@@ -237,6 +279,8 @@ class AppConfig(_Model):
     database: DatabaseConfig | None = None
     market_data: MarketDataConfig = MarketDataConfig()
     portfolio: PortfolioConfig = PortfolioConfig()
+    api: ApiConfig = ApiConfig()
+    notify: NotifyConfig = NotifyConfig()
     accounts: tuple[AccountConfig, ...] = ()
     strategies: tuple[StrategyConfig, ...] = ()
 

@@ -15,7 +15,8 @@ from trader.domain.jsontypes import JsonObj, JsonValue
 from trader.domain.time import to_epoch_ms
 
 
-def to_json(value: object) -> JsonValue:
+def to_json(value: object, *, iso_times: bool = False) -> JsonValue:
+    """``iso_times``: datetimes as ISO-8601 UTC strings (the Control API) instead of epoch ms (storage)."""
     if value is None or isinstance(value, bool | int | str):
         return value
     if isinstance(value, Decimal):
@@ -23,7 +24,7 @@ def to_json(value: object) -> JsonValue:
     if isinstance(value, Enum):
         return to_json(value.value)
     if isinstance(value, datetime):
-        return to_epoch_ms(value)
+        return value.isoformat() if iso_times else to_epoch_ms(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, timedelta):
@@ -31,11 +32,13 @@ def to_json(value: object) -> JsonValue:
     if isinstance(value, float):
         return str(value)  # floats never in domain money; kept exact as text
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: to_json(getattr(value, f.name)) for f in dataclasses.fields(value)}
+        return {
+            f.name: to_json(getattr(value, f.name), iso_times=iso_times) for f in dataclasses.fields(value)
+        }
     if isinstance(value, Mapping):
-        return {str(k): to_json(v) for k, v in value.items()}
+        return {str(k): to_json(v, iso_times=iso_times) for k, v in value.items()}
     if isinstance(value, list | tuple | set | frozenset):
-        return [to_json(v) for v in value]
+        return [to_json(v, iso_times=iso_times) for v in value]
     raise TypeError(f"cannot persist {type(value).__name__}")
 
 
