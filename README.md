@@ -184,3 +184,17 @@ uv run trader openapi --out docs/api/openapi.json   # regenerate the API contrac
 Manual orders from the API go through the same risk checks as strategy orders, and every mutating call is
 recorded in the audit log (`GET /audit`, `data/audit/audit.jsonl`).
 
+## Operations
+
+Run it in Docker with PostgreSQL, watch it with Prometheus, recover it with the runbook:
+[`docs/runbook.md`](docs/runbook.md) ([ADR 0013](docs/adr/0013-ops-hardening.md)).
+
+```bash
+docker compose up -d --build                  # paper mode on synthetic prices (config/docker.yaml)
+curl -s 127.0.0.1:9108/health                 # per-account status; /metrics for Prometheus
+docker compose stop app                       # graceful: pause, settle in-flight orders, persist
+```
+
+The chaos suite (`uv run pytest -m chaos`) kills a real `trader run` mid-order, drops its broker
+connection and restarts it, and checks that the broker and the trader still agree.
+

@@ -13,6 +13,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import pytest
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -21,6 +22,8 @@ from tests.pg import TempPostgres
 from trader.app import App
 from trader.config.settings import AppConfig
 from trader.domain.time import SystemClock
+
+pytestmark = pytest.mark.chaos  # part of the phase 11 chaos suite
 
 
 async def query(url: str, sql: str) -> list[tuple[Any, ...]]:

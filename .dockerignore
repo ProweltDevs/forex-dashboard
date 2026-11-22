@@ -1,0 +1,12 @@
+# Only what the image needs: pyproject.toml, uv.lock, README.md, src/, config/.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!config/
+# Never in the image, even if someone moves things around:
+**/.env
+**/*.env
+**/__pycache__
+config/live.yaml

@@ -243,6 +243,17 @@ class ApiConfig(_Model):
 type SeverityName = Literal["info", "warning", "critical"]
 
 
+class OpsConfig(_Model):
+    """Operations endpoints (SPEC §15): Prometheus ``/metrics`` and ``/health`` on their own port, no auth.
+    Bind them to localhost (or a private Docker network); never publish them on a public interface."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = Field(default=9108, ge=0, le=65535)  # 0: any free port (tests)
+    sample_s: float = Field(default=5.0, gt=0)  # gauges (positions, equity, queue depths) refresh
+    clock_drift_alert_s: float = Field(default=2.0, gt=0)  # |local - broker clock| that raises an alert
+
+
 class TelegramConfig(_Model):
     token_env: str = "TELEGRAM_BOT_TOKEN"
     chat_id_env: str = "TELEGRAM_CHAT_ID"  # a private chat: commands are refused from groups
@@ -281,6 +292,7 @@ class AppConfig(_Model):
     portfolio: PortfolioConfig = PortfolioConfig()
     api: ApiConfig = ApiConfig()
     notify: NotifyConfig = NotifyConfig()
+    ops: OpsConfig = OpsConfig()
     accounts: tuple[AccountConfig, ...] = ()
     strategies: tuple[StrategyConfig, ...] = ()
 

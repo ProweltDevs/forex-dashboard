@@ -59,6 +59,11 @@ class FakeCTraderServer:
         self.deals: list[model.ProtoOADeal] = []  # for ProtoOADealListReq
         self.history_requests = 0
         self.received: list[str] = []
+        # Chaos knobs (tests/chaos): delay execution of new orders, lose the next N order requests on the way
+        # in (received, never executed), and every clientOrderId ever sent to us, in order.
+        self.ack_delay_s = 0.0
+        self.swallow_orders = 0
+        self.new_order_requests: list[str] = []
         self.refreshes = 0
         self.rate_limited = 0
         self._ids = iter(range(10_000, 10_000_000))
@@ -69,11 +74,25 @@ class FakeCTraderServer:
 
     # ------------------------------------------------------------------ lifecycle
 
-    async def start(self) -> int:
-        self._server = await asyncio.start_server(self._serve, "127.0.0.1", 0)
+    async def start(self, port: int = 0) -> int:
+        self._server = await asyncio.start_server(self._serve, "127.0.0.1", port)
         self.port = self._server.sockets[0].getsockname()[1]
-        self._ticker = asyncio.create_task(self._tick_loop())
+        if self._ticker is None or self._ticker.done():
+            self._ticker = asyncio.create_task(self._tick_loop())
         return self.port
+
+    async def go_down(self) -> None:
+        """The broker becomes unreachable: connections dropped, new ones refused. State is kept."""
+        server, self._server = self._server, None
+        if server:
+            server.close()  # stop accepting first, then drop: wait_closed() waits for open connections
+        await self.drop_all()
+        if server:
+            await server.wait_closed()
+
+    async def come_back(self) -> None:
+        """Reachable again on the same port, with the same accounts, orders and positions."""
+        await self.start(self.port)
 
     async def stop(self) -> None:
         if self._ticker:
@@ -125,8 +144,12 @@ class FakeCTraderServer:
             writer.close()
 
     def _send(self, conn: _Conn, message: Message, msg_id: str | None = None) -> None:
-        with contextlib.suppress(Exception):
-            conn.writer.write(encode(message, msg_id))
+        # A request's connection may be gone by the time a (delayed) answer is due: like the real server,
+        # execution events then go to the account's current sessions.
+        targets = [conn] if conn in self._conns else [c for c in self._conns if c.account_authed]
+        for target in targets:
+            with contextlib.suppress(Exception):
+                target.writer.write(encode(message, msg_id if target is conn else None))
 
     def _error(
         self, conn: _Conn, msg_id: str | None, code: str, description: str = "", retry: int = 0
@@ -285,7 +308,13 @@ class FakeCTraderServer:
         elif isinstance(m, msgs.ProtoOAGetTrendbarsReq):
             self._trendbars(conn, m, mid)
         elif isinstance(m, msgs.ProtoOANewOrderReq):
-            self._new_order(conn, m, mid)
+            self.new_order_requests.append(m.clientOrderId)
+            if self.swallow_orders:  # lost on the way in: never executed, never answered
+                self.swallow_orders -= 1
+            elif self.ack_delay_s:
+                asyncio.get_running_loop().call_later(self.ack_delay_s, self._new_order, conn, m, mid)
+            else:
+                self._new_order(conn, m, mid)
         elif isinstance(m, msgs.ProtoOAAmendOrderReq):
             order = self.orders.get(m.orderId)
             if order is None:

@@ -31,7 +31,7 @@ def cfg(data: dict[str, object]) -> AppConfig:
     return AppConfig.model_validate(data)
 
 
-@pytest.mark.parametrize("name", ["paper.yaml", "demo.yaml", "live.yaml.example"])
+@pytest.mark.parametrize("name", ["paper.yaml", "demo.yaml", "live.yaml.example", "docker.yaml"])
 def test_shipped_configs_are_valid(name: str) -> None:
     load_config(ROOT / "config" / name)
 

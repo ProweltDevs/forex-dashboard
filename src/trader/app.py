@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from functools import partial
 from pathlib import Path
+from typing import Any, Literal
 
+from trader import __version__
 from trader.analytics.books import AccountBooks, build_books, load_offline, params_hash
 from trader.analytics.journal import TradeRecord
 from trader.analytics.statement import StatementCheck, compare, day_window
@@ -34,10 +36,13 @@ from trader.domain.errors import ConfigError
 from trader.domain.jsontypes import JsonValue
 from trader.domain.models import Order
 from trader.domain.time import Clock
+from trader.marketdata.bus import Bus
 from trader.marketdata.service import MarketDataService
 from trader.notify.notifier import Channel
 from trader.notify.service import Notifications
 from trader.observability.logging import get_logger
+from trader.observability.metrics import Metrics, OpsMonitor
+from trader.observability.ops import OpsServer
 from trader.oms import AccountRuntime, JsonFileStore, OmsSettings, OrderManager
 from trader.persistence.audit import AuditLog, audit_path
 from trader.persistence.files import write_atomic
@@ -233,6 +238,20 @@ class App:
         self.audit_log = AuditLog(audit_path(config.data_dir), clock, self.persistence)
         self.strategy_configs: dict[str, StrategyConfig] = {st.id: st for st in config.strategies}
         self.notifications = Notifications.from_config(config, env, clock, channels=notify_channels)
+        self.created = clock.now()
+        self.state: Literal["created", "starting", "running", "stopping", "stopped"] = "created"
+        self.metrics = Metrics()
+        self.metrics.build.info({"version": __version__, "mode": str(config.mode)})
+        self.metrics.started.set(self.created.timestamp())
+        self.monitor = OpsMonitor(
+            self,
+            self.metrics,
+            clock,
+            sample=timedelta(seconds=config.ops.sample_s),
+            drift_alert=timedelta(seconds=config.ops.clock_drift_alert_s),
+        )
+        self.ops_events = self.monitor.events  # ops alerts (clock drift)
+        self.ops = OpsServer(self, config.ops) if config.ops.enabled else None
         self.api: ApiServer | None = None
         if config.api.enabled:
             self.api = ApiServer(self, config.api, api_token(config.api, env))
@@ -256,6 +275,9 @@ class App:
 
     async def start(self) -> None:
         self._started = self._clock.now()
+        self.state = "starting"
+        if self.ops is not None:
+            await self.ops.start()  # first: liveness answers during a long startup, readiness says "starting"
         db = self.persistence
         if db is not None:
             await db.start()  # never blocks startup: an unreachable database only means WAL buffering
@@ -338,8 +360,13 @@ class App:
         if notes is not None:
             notes.attach(self.runner.events, "strategies")
             notes.attach(self.market.feeds, "feeds")
+            notes.attach(self.ops_events, "ops")
             if db is not None:
                 notes.attach(db.writer.events, "db")
+        if db is not None:
+            db.attach(self.ops_events, None, name="persistence-ops")
+        self._attach_metrics()
+        await self.monitor.start()
         await self.runner.run()
         await self.runner.start_all()
         self._persist_strategies()
@@ -351,7 +378,34 @@ class App:
             if tg is not None and tg.commands:
                 await notes.enable_commands(Control(self, actor="telegram"))
             notes.info("app:started", "Trader started", "\n".join(self._status_lines()))
+        self.state = "running"
         _log.info("app_started", accounts=sorted(self.accounts), strategies=sorted(self.runner.handles))
+
+    def _attach_metrics(self) -> None:
+        mon = self.monitor
+        mon.attach(self.market.ticks, "ticks", maxsize=200_000)
+        mon.attach(self.market.feeds, "feeds")
+        for aid, services in self.accounts.items():
+            mon.attach(services.oms.events, aid)
+        for aid, books in self.books.items():
+            mon.attach(books.portfolio.events, f"{aid}-alerts")
+        if self.runner is not None:
+            mon.attach(self.runner.events, "strategies")
+        if self.persistence is not None:
+            mon.attach(self.persistence.writer.events, "db")
+
+    def event_buses(self) -> list[Bus[Any]]:
+        """Every event bus of the process (queue-depth metrics)."""
+        buses: list[Bus[Any]] = [self.market.ticks, self.market.bars, self.market.feeds, self.ops_events]
+        buses += [s.oms.events for s in self.accounts.values()]
+        buses += [b.portfolio.events for b in self.books.values()]
+        if self.runner is not None:
+            buses.append(self.runner.events)
+        if self.persistence is not None:
+            buses.append(self.persistence.writer.events)
+        if self.api is not None and self.api.hub is not None:
+            buses.append(self.api.hub.events)
+        return buses
 
     def _order_of(self, account_id: str, client_order_id: str) -> Order | None:
         services = self.accounts.get(account_id)
@@ -446,6 +500,7 @@ class App:
 
     async def stop(self) -> RunReport:
         """Pause strategies, let in-flight orders settle, persist everything, disconnect."""
+        self.state = "stopping"
         if self.api is not None:
             await self.api.stop()  # first: no new commands during shutdown
         runner = self.runner
@@ -469,6 +524,7 @@ class App:
         for feed in self.feeds.values():
             await feed.close()
         await self.market.stop()
+        await self.monitor.stop()
         if self.notifications is not None:
             self.notifications.info(
                 "app:stopped",
@@ -480,6 +536,9 @@ class App:
             self._persist_strategies()
             await self.persistence.stop()  # last: flushes to the database, or to the WAL if it is down
         report.stopped = self._clock.now()
+        self.state = "stopped"
+        if self.ops is not None:
+            await self.ops.stop()  # last: readiness said "stopping" until the end
         _log.info("app_stopped", strategy_errors=report.strategy_errors)
         return report
 

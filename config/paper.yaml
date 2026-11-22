@@ -13,6 +13,14 @@ market_data:
   warmup_bars: 300
   stale: {min_silence_s: 15, max_silence_s: 120, multiplier: 20}
   recorder: {enabled: true, batch_size: 5000, flush_interval_s: 10}
+# Ops endpoints (SPEC §15, docs/runbook.md): Prometheus /metrics and /health on their own port, no auth.
+# Keep them on localhost or a private network.
+ops:
+  enabled: true
+  host: 127.0.0.1
+  port: 9108
+  sample_s: 5                    # gauges refresh
+  clock_drift_alert_s: 2         # alert when this host's clock and a broker's differ by more
 # Control API (SPEC §13, docs/api/README.md): REST + the /stream WebSocket, for the UI and scripts.
 # Bearer token from TRADER_API_TOKEN (.env, at least 32 characters). Localhost only: put a TLS reverse proxy
 # in front if you need it elsewhere. Every mutating call is written to the audit log.

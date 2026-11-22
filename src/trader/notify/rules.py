@@ -25,6 +25,7 @@ from trader.domain.events import (
     StrategyEvent,
 )
 from trader.domain.models import Fill, Order, Position
+from trader.observability.metrics import reject_rule
 
 from .notifier import Notice, Severity
 
@@ -144,7 +145,7 @@ class EventRules:
             return None
         r = o.request
         reason = o.rejection_reason or "rejected"
-        rule = ":".join(reason.split(":")[:2]) if reason.startswith("risk:") else reason.split(":")[0]
+        rule = reject_rule(reason)
         return Notice(
             key=f"reject:{event.account_id}:{r.strategy_id}:{rule}",
             severity=Severity.WARNING,

@@ -8,6 +8,14 @@ logging:
 database:
   url_env: TRADER_DB_URL
   pool_size: 5
+# Ops endpoints (SPEC §15, docs/runbook.md): Prometheus /metrics and /health on their own port, no auth.
+# Keep them on localhost or a private network.
+ops:
+  enabled: true
+  host: 127.0.0.1
+  port: 9108
+  sample_s: 5                    # gauges refresh
+  clock_drift_alert_s: 2         # alert when this host's clock and a broker's differ by more
 accounts:
   - id: ctrader-demo
     broker: ctrader
