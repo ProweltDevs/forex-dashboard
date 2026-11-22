@@ -2,6 +2,7 @@
 
 from .enums import (
     ConnectionState,
+    FeedState,
     OrderStatus,
     OrderType,
     PositionChange,
@@ -16,6 +17,7 @@ from .events import (
     BarEvent,
     ConnectionEvent,
     DomainEvent,
+    FeedEvent,
     FillEvent,
     OrderEvent,
     PositionEvent,
@@ -47,6 +49,8 @@ __all__ = [
     "ConnectionEvent",
     "ConnectionState",
     "DomainEvent",
+    "FeedEvent",
+    "FeedState",
     "Fill",
     "FillEvent",
     "Instrument",

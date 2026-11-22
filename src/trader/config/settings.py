@@ -10,7 +10,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from trader.domain.enums import TradingMode
+from trader.domain.enums import Timeframe, TradingMode
 
 BrokerName = Literal["paper", "exness", "ctrader"]
 Environment = Literal["demo", "live"]
@@ -121,11 +121,52 @@ class AccountConfig(_Model):
         return self
 
 
+class StaleFeedConfig(_Model):
+    min_silence_s: int = Field(default=15, ge=1)
+    max_silence_s: int = Field(default=120, ge=1)
+    multiplier: int = Field(default=20, ge=1)
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        if self.max_silence_s < self.min_silence_s:
+            raise ValueError("max_silence_s must be >= min_silence_s")
+        return self
+
+
+class RecorderConfig(_Model):
+    enabled: bool = True  # always on in production; tests may disable it
+    batch_size: int = Field(default=5_000, ge=1)
+    flush_interval_s: int = Field(default=10, ge=1)
+
+
+class MarketDataConfig(_Model):
+    timeframes: tuple[Timeframe, ...] = (Timeframe.M1, Timeframe.M5, Timeframe.M15, Timeframe.H1)
+    price_source: Literal["bid", "ask", "mid"] = "bid"  # broker candles are bid-based
+    # Trading-day alignment in minutes: -120 = days and weeks start at 22:00 UTC (NY close, or the midnight
+    # of a UTC+2 broker server); 0 = UTC midnight. Bars at every timeframe shift with it.
+    day_offset_minutes: int = Field(default=0, ge=-720, le=720)
+    bar_history: int = Field(default=1_000, ge=1)
+    bar_grace_ms: int = Field(default=2_000, ge=0)
+    warmup_bars: int = Field(default=300, ge=0)
+    stale: StaleFeedConfig = StaleFeedConfig()
+    recorder: RecorderConfig = RecorderConfig()
+
+    @field_validator("timeframes")
+    @classmethod
+    def _check_tfs(cls, value: tuple[Timeframe, ...]) -> tuple[Timeframe, ...]:
+        if not value:
+            raise ValueError("at least one timeframe")
+        if len(set(value)) != len(value):
+            raise ValueError("duplicate timeframes")
+        return value
+
+
 class AppConfig(_Model):
     mode: TradingMode = TradingMode.PAPER
     data_dir: Path = Path("data")
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig | None = None
+    market_data: MarketDataConfig = MarketDataConfig()
     accounts: tuple[AccountConfig, ...] = ()
 
     @model_validator(mode="after")
