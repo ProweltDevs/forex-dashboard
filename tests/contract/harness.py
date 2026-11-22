@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import TypeVar
 
+import pytest
+from pydantic import SecretStr
+
 from trader.brokers.base import Broker, RateLimit
+from trader.brokers.ctrader import CTraderBroker, CTraderSettings, TokenSet, TokenStore
 from trader.brokers.paper import FakeTickSource, PaperBroker, PaperSettings
-from trader.domain import Instrument, OrderType, Side, Tick, TickEvent
+from trader.config.secrets import read_env_file
+from trader.domain import ConnectionEvent, ConnectionState, Instrument, OrderType, Side, Tick, TickEvent
 from trader.domain.events import DomainEvent, FillEvent
 from trader.domain.ids import new_client_order_id
 from trader.domain.models import OrderRequest
@@ -198,4 +205,105 @@ async def paper_harness() -> ContractHarness:
     )
 
 
-HARNESSES: dict[str, Callable[[], Awaitable[ContractHarness]]] = {"paper": paper_harness}
+# ---------------------------------------------------------------------------------------------- ctrader
+
+
+async def _ctrader_harness(
+    broker: CTraderBroker, symbol: str, teardown_extra: Callable[[], Awaitable[None]]
+) -> ContractHarness:
+    await broker.connect()
+    recorder = EventRecorder(broker)
+    await broker.subscribe_ticks([symbol])
+    await recorder.wait_for(TickEvent, timeout=15)
+    await broker.snapshot()
+
+    dropped_at = [0]
+
+    async def drop() -> None:
+        dropped_at[0] = recorder.mark
+        await broker.drop_connection()
+
+    async def wait_up() -> None:
+        """The adapter reconnects by itself: wait for DOWN, then UP, after the forced drop."""
+        after = dropped_at[0]
+        await recorder.wait_for(
+            ConnectionEvent, lambda e: e.state is ConnectionState.DOWN, after=after, timeout=30
+        )
+        downs = [i for i, e in enumerate(recorder.events) if isinstance(e, ConnectionEvent) and i >= after]
+        await recorder.wait_for(
+            ConnectionEvent, lambda e: e.state is ConnectionState.UP, after=downs[0], timeout=30
+        )
+
+    async def teardown() -> None:
+        await broker.close()
+        await teardown_extra()
+
+    return ContractHarness(
+        broker=broker,
+        symbol=symbol,
+        recorder=recorder,
+        force_disconnect=drop,
+        reconnect=wait_up,
+        teardown=teardown,
+    )
+
+
+async def ctrader_fake_harness() -> ContractHarness:
+    from tests.integration.ctrader_fake import FakeCTraderServer
+
+    server = FakeCTraderServer()
+    port = await server.start()
+    settings = CTraderSettings(
+        account_id="contract-ctrader-fake", ctid_trader_account_id=server.ctid, environment="demo",
+        client_id=server.client_id, client_secret=SecretStr(server.client_secret), symbols=("EURUSD",),
+        host="127.0.0.1", port=port, use_tls=False, reconnect_initial_s=0.05, account_poll_s=0.5,
+    )  # fmt: skip
+    tokens = TokenSet(SecretStr(server.access_token), SecretStr(server.refresh_token), expires_at=None)
+    broker = CTraderBroker(
+        settings, tokens=tokens, store=TokenStore(Path("/nonexistent"), None), clock=SystemClock()
+    )
+    return await _ctrader_harness(broker, "EURUSD", server.stop)
+
+
+DEMO_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+CTRADER_DEMO_REQUIRED = (
+    "CTRADER_DEMO_CLIENT_ID", "CTRADER_DEMO_CLIENT_SECRET", "CTRADER_DEMO_ACCESS_TOKEN",
+    "CTRADER_DEMO_REFRESH_TOKEN", "CTRADER_DEMO_ACCOUNT_ID",
+)  # fmt: skip
+
+
+def demo_env() -> dict[str, str]:
+    return {**read_env_file(DEMO_ENV_FILE), **os.environ}
+
+
+async def ctrader_demo_harness() -> ContractHarness:
+    """DEMO ONLY. Uses CTRADER_DEMO_* credentials from the environment or .env."""
+    env = demo_env()
+    missing = [k for k in CTRADER_DEMO_REQUIRED if not env.get(k)]
+    if missing:
+        pytest.skip(f"cTrader demo credentials missing: {', '.join(missing)}")
+    from trader.brokers.registry import BrokerDeps, default_registry
+    from trader.config.settings import AccountConfig
+
+    symbol = env.get("CTRADER_DEMO_SYMBOL", "EURUSD")
+    account = AccountConfig.model_validate(
+        {
+            "id": "contract-ctrader-demo", "broker": "ctrader", "environment": "demo",  # never live
+            "account_id": env["CTRADER_DEMO_ACCOUNT_ID"], "secrets_ref": "CTRADER_DEMO", "symbols": [symbol],
+            "ctrader": {"proxy": env.get("CTRADER_PROXY") or None},
+        }
+    )  # fmt: skip
+    broker = default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
+    assert isinstance(broker, CTraderBroker)
+
+    async def nothing() -> None:
+        return None
+
+    return await _ctrader_harness(broker, symbol, nothing)
+
+
+HARNESSES: dict[str, Callable[[], Awaitable[ContractHarness]]] = {
+    "paper": paper_harness,
+    "ctrader-fake": ctrader_fake_harness,
+    "ctrader-demo": ctrader_demo_harness,
+}

@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from pydantic import SecretStr
+
+from trader.config.secrets import load_secrets
 from trader.config.settings import AccountConfig
 from trader.domain.errors import ConfigError
 from trader.domain.time import Clock
@@ -21,6 +25,7 @@ class BrokerDeps:
     clock: Clock
     env: Mapping[str, str] = field(default_factory=dict)  # secrets are read from here by secrets_ref
     market_data: MarketDataSource | None = None  # required by the paper broker
+    data_dir: Path = Path("data")  # encrypted token stores live under data_dir/secrets
 
 
 type BrokerFactory = Callable[[AccountConfig, BrokerDeps], Broker]
@@ -77,8 +82,45 @@ def _paper_factory(account: AccountConfig, deps: BrokerDeps) -> Broker:
     return PaperBroker(deps.market_data, paper_settings(account), deps.clock, name="paper")
 
 
+CTRADER_SECRETS = ("client_id", "client_secret", "access_token", "refresh_token")
+
+
+def _ctrader_factory(account: AccountConfig, deps: BrokerDeps) -> Broker:
+    # Imported lazily so the protobuf bindings load only when a cTrader account is configured.
+    from .ctrader import CTraderBroker, CTraderSettings, TokenSet, TokenStore
+    from .ctrader.oauth import SECRETS_KEY_ENV
+
+    if account.secrets_ref is None:  # guaranteed by AccountConfig validation
+        raise ConfigError(f"account {account.id!r} needs a secrets_ref")
+    if not account.account_id.isdigit():
+        raise ConfigError(f"account {account.id!r}: account_id must be the numeric ctidTraderAccountId")
+    secrets = load_secrets(account.secrets_ref, deps.env, required=CTRADER_SECRETS)
+    key = deps.env.get(SECRETS_KEY_ENV)
+    store = TokenStore(
+        deps.data_dir / "secrets" / f"ctrader-{account.id}.tokens",
+        SecretStr(key) if key else None,
+    )
+    tokens = store.load() or TokenSet(secrets["access_token"], secrets["refresh_token"], expires_at=None)
+    opts = account.ctrader
+    settings = CTraderSettings(
+        account_id=account.id,
+        ctid_trader_account_id=int(account.account_id),
+        environment=account.environment,
+        client_id=secrets["client_id"].get_secret_value(),
+        client_secret=secrets["client_secret"],
+        symbols=account.symbols,
+        symbol_aliases=dict(opts.symbol_aliases) if opts else {},
+        host=opts.host if opts else None,
+        port=opts.port if opts else 5035,
+        use_tls=opts.use_tls if opts else True,
+        proxy=opts.proxy if opts else None,
+    )
+    return CTraderBroker(settings, tokens=tokens, store=store, clock=deps.clock)
+
+
 def default_registry() -> BrokerRegistry:
-    """Registry with every adapter available in this build (exness/ctrader arrive in phases 2-3)."""
+    """Registry with every adapter available in this build (exness arrives in phase 3)."""
     registry = BrokerRegistry()
     registry.register("paper", _paper_factory)
+    registry.register("ctrader", _ctrader_factory)
     return registry

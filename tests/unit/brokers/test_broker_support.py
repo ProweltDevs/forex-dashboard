@@ -127,7 +127,7 @@ def test_margin_required() -> None:
 def test_registry_creates_paper_and_rejects_unknown() -> None:
     clock = FixedClock(T0)
     registry = default_registry()
-    assert registry.names() == {"paper"}
+    assert registry.names() == {"paper", "ctrader"}
     account = AccountConfig.model_validate(
         {"id": "p", "broker": "paper", "paper": {"leverage": 30, "hedging": False}}
     )
@@ -138,11 +138,9 @@ def test_registry_creates_paper_and_rejects_unknown() -> None:
 
     with pytest.raises(ConfigError, match="market data"):
         registry.create(account, BrokerDeps(clock=clock))
-    ct = AccountConfig.model_validate(
-        {"id": "c", "broker": "ctrader", "account_id": "1", "secrets_ref": "CT"}
-    )
-    with pytest.raises(ConfigError, match="no adapter registered for broker 'ctrader'"):
-        registry.create(ct, BrokerDeps(clock=clock))
+    ex = AccountConfig.model_validate({"id": "e", "broker": "exness", "account_id": "1", "secrets_ref": "EX"})
+    with pytest.raises(ConfigError, match="no adapter registered for broker 'exness'"):
+        registry.create(ex, BrokerDeps(clock=clock))
     with pytest.raises(ValueError, match="already registered"):
         registry.register("paper", lambda a, d: broker)
     assert BrokerRegistry().names() == frozenset()

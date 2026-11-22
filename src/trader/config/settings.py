@@ -57,6 +57,16 @@ class PaperConfig(_Model):
     market_data_from: str | None = None  # id of another account to source live ticks from
 
 
+class CTraderOptions(_Model):
+    """cTrader-specific account options. Credentials are NOT here: they come from ``secrets_ref`` env vars."""
+
+    symbol_aliases: dict[str, str] = Field(default_factory=dict)  # broker symbol name -> canonical
+    proxy: str | None = None  # http://host:port CONNECT proxy, only if your network requires one
+    host: str | None = None  # override the demo/live endpoint (tests)
+    port: int = Field(default=5035, ge=1, le=65535)
+    use_tls: bool = True
+
+
 class AccountConfig(_Model):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     broker: BrokerName
@@ -65,6 +75,7 @@ class AccountConfig(_Model):
     secrets_ref: str | None = None  # env-var prefix, e.g. CTRADER_DEMO -> CTRADER_DEMO_CLIENT_ID
     symbols: tuple[str, ...] = ()
     paper: PaperConfig | None = None
+    ctrader: CTraderOptions | None = None
 
     @field_validator("secrets_ref")
     @classmethod
@@ -85,12 +96,14 @@ class AccountConfig(_Model):
 
     @model_validator(mode="after")
     def _check_broker_fields(self) -> Self:
+        # Each broker-specific options block is only valid for its own broker.
+        for key in ("paper", "ctrader"):
+            if getattr(self, key) is not None and self.broker != key:
+                raise ValueError(f"'{key}' settings are only valid for broker: {key}")
         if self.broker == "paper":
             if self.environment == "live":
                 raise ValueError("paper accounts cannot have environment: live")
         else:
-            if self.paper is not None:
-                raise ValueError("'paper' settings are only valid for broker: paper")
             if not self.secrets_ref:
                 raise ValueError(f"{self.broker} accounts need a secrets_ref")
             if not self.account_id:

@@ -4,6 +4,7 @@ cannot leak through ``repr``/logs by accident."""
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 from pydantic import SecretStr
 
@@ -23,3 +24,47 @@ def load_secrets(ref: str, env: Mapping[str, str], required: tuple[str, ...] = (
         names = ", ".join(f"{prefix}{m.upper()}" for m in missing)
         raise ConfigError(f"missing secrets: {names}")  # names only, never values
     return found
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """Parse a ``.env`` file (KEY=VALUE lines, ``#`` comments, optional quotes). Missing file -> {}.
+    Never logs values."""
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        result[key] = value
+    return result
+
+
+def update_env_file(path: Path, values: Mapping[str, str]) -> None:
+    """Set ``KEY=value`` lines in a ``.env`` file (replacing existing keys, appending new ones) and make
+    it 0600. Used to store tokens without ever printing them."""
+    import os
+
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    pending = dict(values)
+    out: list[str] = []
+    for line in lines:
+        key = line.split("=", 1)[0].strip().removeprefix("export ").strip()
+        if "=" in line and not line.lstrip().startswith("#") and key in pending:
+            out.append(f"{key}={pending.pop(key)}")
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in pending.items())
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)

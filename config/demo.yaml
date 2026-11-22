@@ -7,9 +7,12 @@ accounts:
   - id: ctrader-demo
     broker: ctrader
     environment: demo
-    account_id: "0000000"          # cTrader ctidTraderAccountId
-    secrets_ref: CTRADER_DEMO
+    account_id: "0000000"          # numeric ctidTraderAccountId (run `uv run trader ctrader-auth`)
+    secrets_ref: CTRADER_DEMO      # CTRADER_DEMO_CLIENT_ID/_CLIENT_SECRET/_ACCESS_TOKEN/_REFRESH_TOKEN
     symbols: [EURUSD, GBPUSD, XAUUSD]
+    ctrader:
+      symbol_aliases: {}           # broker symbol name -> canonical, e.g. {"GOLD": "XAUUSD"}
+      # proxy: http://proxy:3128   # only if your network needs an HTTP CONNECT proxy
   - id: exness-demo
     broker: exness
     environment: demo

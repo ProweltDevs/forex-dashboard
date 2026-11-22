@@ -6,8 +6,12 @@ import pytest
 
 from .harness import HARNESSES, ContractHarness
 
-# Real adapters are added here as pytest.param("ctrader", marks=pytest.mark.demo) in phases 2-3.
-ADAPTERS = [pytest.param("paper", id="paper")]
+# Real adapters run only with `-m demo` against DEMO accounts; they skip when credentials are missing.
+ADAPTERS = [
+    pytest.param("paper", id="paper"),
+    pytest.param("ctrader-fake", id="ctrader-fake"),
+    pytest.param("ctrader-demo", id="ctrader-demo", marks=pytest.mark.demo),
+]
 
 
 @pytest.fixture(params=ADAPTERS)

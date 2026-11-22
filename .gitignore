@@ -12,9 +12,10 @@ build/
 .coverage
 htmlcov/
 
-# Secrets — never commit
+# Secrets — never commit (any *.env / .env.* file except the template)
 .env
 .env.*
+*.env
 !.env.example
 secrets/
 *.pem
