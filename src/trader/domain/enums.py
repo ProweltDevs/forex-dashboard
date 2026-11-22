@@ -117,6 +117,27 @@ class RiskDecision(StrEnum):
     REJECTED = "REJECTED"
 
 
+class KillLevel(StrEnum):
+    """Kill switch / circuit breaker level. Each level includes the ones below it."""
+
+    NONE = "NONE"
+    PAUSE_NEW = "PAUSE_NEW"  # no new entries; closes and cancels still allowed
+    CANCEL_PENDING = "CANCEL_PENDING"  # + cancel every pending order
+    FLATTEN_ALL = "FLATTEN_ALL"  # + close every position
+
+    @property
+    def rank(self) -> int:
+        return _KILL_RANK[self]
+
+
+_KILL_RANK = {
+    KillLevel.NONE: 0,
+    KillLevel.PAUSE_NEW: 1,
+    KillLevel.CANCEL_PENDING: 2,
+    KillLevel.FLATTEN_ALL: 3,
+}
+
+
 class TradingMode(StrEnum):
     PAPER = "paper"
     DEMO = "demo"

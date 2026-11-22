@@ -12,6 +12,9 @@ accounts:
     symbols: [EURUSD, GBPUSD, XAUUSD]
     ctrader:
       symbol_aliases: {}           # broker symbol name -> canonical, e.g. {"GOLD": "XAUUSD"}
+    # Risk uses the built-in defaults (all listed in config/live.yaml.example). Override only what you need:
+    risk:
+      strategies: {}               # e.g. {scalper: {max_order_volume: "0.2", require_sl: false}}
       # proxy: http://proxy:3128   # only if your network needs an HTTP CONNECT proxy
   - id: exness-demo
     broker: exness

@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from trader.domain.enums import Timeframe, TradingMode
 
+from .risk import RiskConfig
+
 BrokerName = Literal["paper", "exness", "ctrader"]
 Environment = Literal["demo", "live"]
 
@@ -86,6 +88,7 @@ class AccountConfig(_Model):
     paper: PaperConfig | None = None
     ctrader: CTraderOptions | None = None
     exness: ExnessOptions | None = None
+    risk: RiskConfig = RiskConfig()
 
     @field_validator("secrets_ref")
     @classmethod

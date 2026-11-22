@@ -29,5 +29,8 @@ accounts:
       swap_long_per_lot: "0"     # account currency per lot per night
       swap_short_per_lot: "0"
       rollover_hour_utc: 21
+    risk:                          # built-in defaults; every field is listed in config/live.yaml.example
+      limits: {}
+      strategies: {}               # per-strategy overrides
       # rate_limit: {rate_per_s: 50, burst: 50}   # emulate broker-side request limits
       # market_data_from: ctrader-demo   # uncomment to drive paper fills from a real demo feed

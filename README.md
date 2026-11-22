@@ -55,5 +55,36 @@ Every order goes `Strategy → OrderIntent → risk gate → OrderManager → Br
 owns order state. PENDING_SUBMIT is persisted before sending, so a crash mid-order is resolved on restart:
 the order is found at the broker, or resent once with the same id while the signal is fresh. Reconcile runs
 before trading resumes. Missing broker features (expiry, SL/TP, stop-limit, trailing, break-even, time
-exits, scale-outs, OCO) are emulated. See [ADR 0007](docs/adr/0007-oms.md). Until phase 6 the risk gate is
-`ApproveAll` (tests/paper only).
+exits, scale-outs, OCO) are emulated. See [ADR 0007](docs/adr/0007-oms.md).
+
+## Risk
+
+Every new order passes the `RiskEngine`. It applies limits on:
+- size and position count;
+- exposure and margin;
+- loss per trade (an SL is required by default);
+- daily loss and drawdown;
+- order flow;
+- spread, stale prices and fat-finger prices;
+- trading sessions, the weekend and blackouts;
+- duplicate signals.
+
+Limits are set per account in the `risk:` block, with per-strategy overrides. Every default is listed in
+`config/live.yaml.example`. Circuit breakers escalate a kill switch (PAUSE_NEW → CANCEL_PENDING →
+FLATTEN_ALL). Its state is persisted, so a restart cannot clear it. See
+[ADR 0008](docs/adr/0008-risk-engine.md).
+
+Emergency stop for one broker account (closes and cancels everything on it):
+
+```bash
+uv run trader kill --config config/demo.yaml --account ctrader-demo --level FLATTEN_ALL --reason "manual stop"
+```
+
+Clear the switch:
+
+```bash
+uv run trader kill --config config/demo.yaml --account ctrader-demo --reset --reason "reviewed"
+```
+
+Live accounts also need `TRADER_MODE=live` and `--confirm-live`. Acceptance on demo:
+`uv run pytest -m demo tests/contract/test_kill_switch_demo.py -s` (the demo account must start flat).

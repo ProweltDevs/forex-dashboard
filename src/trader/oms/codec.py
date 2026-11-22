@@ -9,11 +9,9 @@ from decimal import Decimal
 
 from trader.domain.enums import OrderStatus, OrderType, Side, TimeInForce
 from trader.domain.exits import BreakEven, ExitSpec, ScaleLevel, ScaleOut, TimeExit, TrailingStop
+from trader.domain.jsontypes import JsonObj, JsonValue
 from trader.domain.models import Order, OrderRequest, Position, StatusChange
 from trader.domain.time import from_epoch_ms, to_epoch_ms
-
-type JsonValue = str | int | bool | list[JsonValue] | dict[str, JsonValue] | None
-type JsonObj = dict[str, JsonValue]
 
 
 def _d(v: Decimal | None) -> str | None:

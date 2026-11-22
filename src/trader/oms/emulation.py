@@ -18,11 +18,10 @@ from decimal import Decimal
 
 from trader.domain.enums import Side
 from trader.domain.exits import BreakEven, ExitSpec, ScaleOut, TimeExit, TrailingStop
+from trader.domain.jsontypes import JsonObj, JsonValue
 from trader.domain.models import Instrument, Position, Tick
 from trader.domain.money import floor_to_step
 from trader.domain.time import from_epoch_ms, to_epoch_ms
-
-from .codec import JsonObj, JsonValue
 
 # ------------------------------------------------------------------------------------------- actions
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from .enums import ConnectionState, FeedState, OrderStatus, PositionChange, RiskDecision
+from .enums import ConnectionState, FeedState, KillLevel, OrderStatus, PositionChange, RiskDecision
 from .models import AccountState, Bar, Fill, Order, Position, Tick
 
 
@@ -107,6 +107,19 @@ class RiskEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RiskStateEvent:
+    """The account's kill-switch level changed (manual or a circuit breaker). Strategies stop entering at
+    PAUSE_NEW and above; the OMS cancels pending orders at CANCEL_PENDING and flattens at FLATTEN_ALL."""
+
+    account_id: str
+    level: KillLevel
+    previous: KillLevel
+    reason: str
+    triggers: tuple[str, ...]  # active triggers, e.g. ("manual", "daily_loss")
+    ts: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StrategyEvent:
     strategy_id: str
     kind: str  # e.g. "started", "paused", "error", "slow_callback"
@@ -125,5 +138,6 @@ type DomainEvent = (
     | FeedEvent
     | ReconcileEvent
     | RiskEvent
+    | RiskStateEvent
     | StrategyEvent
 )

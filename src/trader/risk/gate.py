@@ -1,14 +1,20 @@
-"""The risk port the OMS calls for every new order (SPEC §2: Strategy -> intent -> RiskEngine.pre_trade ->
-OrderManager -> Broker; nothing bypasses risk). Phase 6 implements the rules; this module defines the
-contract and the account view the rules read."""
+"""The risk port the OMS calls (SPEC §2: Strategy -> intent -> RiskEngine.pre_trade -> OrderManager ->
+Broker; nothing bypasses risk). ``trader.risk.engine.RiskEngine`` implements it.
+
+Every method runs on the account's OMS writer task, so implementations are synchronous, fast and free of
+IO. They never call the broker; they return a ``RiskOutput`` and the OMS acts on it (publish events,
+cancel pending orders, flatten). Persistent state goes through ``dump``/``load`` inside the OMS snapshot.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Protocol
 
+from trader.domain.enums import KillLevel
+from trader.domain.events import DomainEvent
+from trader.domain.jsontypes import JsonObj
 from trader.domain.models import AccountState, Instrument, Order, OrderIntent, Position, Tick
 
 
@@ -41,15 +47,66 @@ class RiskVerdict:
         return cls(approved=False, rule=rule, reason=reason)
 
 
-class RiskGate(Protocol):
+@dataclass(frozen=True, slots=True)
+class RiskOutput:
+    """What the OMS must do after a risk hook. ``changed`` = persisted risk state changed."""
+
+    events: tuple[DomainEvent, ...] = ()
+    cancel_pending: bool = False
+    flatten: bool = False
+    changed: bool = False
+
+    def __or__(self, other: RiskOutput) -> RiskOutput:
+        return RiskOutput(
+            events=self.events + other.events,
+            cancel_pending=self.cancel_pending or other.cancel_pending,
+            flatten=self.flatten or other.flatten,
+            changed=self.changed or other.changed,
+        )
+
+
+NOTHING = RiskOutput()
+
+
+class RiskGate:
+    """The port, with no-op hooks; subclasses override what they need."""
+
+    @property
+    def level(self) -> KillLevel:
+        return KillLevel.NONE
+
     def pre_trade(self, intent: OrderIntent, view: AccountView) -> RiskVerdict:
-        """Approve or reject a new order. Must be fast and pure (runs on the OMS writer task)."""
-        ...
+        """Approve or reject a new order."""
+        raise NotImplementedError
+
+    def on_tick(self, tick: Tick) -> None:
+        """Every tick, synchronously (keep it O(1))."""
+
+    def observe(self, event: DomainEvent, view: AccountView) -> RiskOutput:
+        """Every event the OMS publishes (fills, orders, account, reconcile, connection)."""
+        return NOTHING
+
+    def on_time(self, view: AccountView) -> RiskOutput:
+        """The OMS timer (about once a second): time-based breakers and re-enforcement."""
+        return NOTHING
+
+    def kill(self, level: KillLevel, reason: str, view: AccountView) -> RiskOutput:
+        """Manual kill switch (API/CLI). Latched until ``reset``."""
+        raise NotImplementedError("this risk gate has no kill switch")
+
+    def reset(self, reason: str, view: AccountView) -> RiskOutput:
+        """Manual reset: clears the manual switch and latched breakers (live conditions re-trigger)."""
+        raise NotImplementedError("this risk gate has no kill switch")
+
+    def dump(self) -> JsonObj:
+        return {}
+
+    def load(self, data: JsonObj) -> None:
+        """Restore what ``dump`` returned (after a restart)."""
 
 
-class ApproveAll:
-    """Approves everything. Only for tests and for running before the phase-6 RiskEngine exists; the
-    composition root must never use it for live accounts."""
+class ApproveAll(RiskGate):
+    """Approves everything. Only for tests; the composition root never uses it (it builds a RiskEngine)."""
 
     def pre_trade(self, intent: OrderIntent, view: AccountView) -> RiskVerdict:
         return RiskVerdict.approve(rule="approve_all", reason="no risk engine configured")

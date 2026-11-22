@@ -6,7 +6,7 @@ import logging
 import re
 import sys
 from collections.abc import Mapping, MutableMapping
-from typing import Any
+from typing import Any, TextIO, cast
 
 import structlog
 from pydantic import SecretBytes, SecretStr
@@ -67,6 +67,20 @@ def redaction_processor(
     return event_dict
 
 
+class _CurrentStderr:
+    """Writes to whatever ``sys.stderr`` is at write time, not at configuration time. A handler bound to the
+    original object breaks once that stream is replaced and closed (test capture, daemonisation)."""
+
+    def write(self, text: str) -> int:
+        return sys.stderr.write(text)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
+
+
+_STDERR = _CurrentStderr()
+
+
 def configure_logging(level: str = "INFO", *, json: bool = True) -> None:
     """Configure structlog (and route stdlib logging through it). Redaction always runs last
     before rendering, so it also covers exception text."""
@@ -85,10 +99,10 @@ def configure_logging(level: str = "INFO", *, json: bool = True) -> None:
     structlog.configure(
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=cast("TextIO", _STDERR)),
         cache_logger_on_first_use=False,
     )
-    handler = logging.StreamHandler(sys.stderr)
+    handler = logging.StreamHandler(_STDERR)
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             foreign_pre_chain=shared,

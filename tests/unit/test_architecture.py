@@ -62,3 +62,22 @@ def test_no_float_annotations_in_domain_or_oms() -> None:
             for node in ast.walk(tree):
                 if isinstance(node, ast.AnnAssign | ast.arg) and node.annotation is not None:
                     assert "float" not in ast.unparse(node.annotation), f"float in {path.name}"
+
+
+@pytest.mark.parametrize("path", _py_files("risk"), ids=lambda p: p.name)
+def test_risk_depends_only_on_domain_config_and_ports(path: Path) -> None:
+    """Risk is pure decision logic: it never talks to a broker or the OMS (the OMS executes its outputs)."""
+    allowed = ("trader.domain", "trader.config", "trader.observability", "trader.risk", "trader.brokers.base")
+    for name in _imports(path):
+        if name.startswith("trader"):
+            assert name.startswith(allowed), f"{path.name} imports {name}"
+        else:
+            assert name.split(".")[0] in {
+                "__future__",
+                "collections",
+                "dataclasses",
+                "datetime",
+                "decimal",
+                "typing",
+                "re",
+            }, f"{path.name} imports {name}"

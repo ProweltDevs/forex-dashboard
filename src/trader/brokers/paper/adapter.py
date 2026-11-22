@@ -19,6 +19,7 @@ from typing import Final
 
 from trader.brokers.base import BrokerAck, Capabilities, MarketDataSource, OrderChanges, RateLimits
 from trader.brokers.ratelimit import TokenBucket
+from trader.domain.accounting import margin_required, pnl_quote, weighted_entry
 from trader.domain.enums import (
     ConnectionState,
     OrderStatus,
@@ -66,7 +67,6 @@ from trader.domain.money import ZERO
 from trader.domain.time import Clock, ensure_utc
 from trader.observability.logging import get_logger
 
-from .accounting import margin_required, pnl_quote, weighted_entry
 from .settings import PaperSettings
 
 _log = get_logger("trader.brokers.paper")

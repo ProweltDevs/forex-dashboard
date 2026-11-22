@@ -11,11 +11,11 @@ from hypothesis import strategies as st
 from tests.factories import T0, eurusd
 from trader.brokers.base import Broker, OrderChanges, RateLimit, RateLimits
 from trader.brokers.paper import FakeTickSource, PaperBroker
-from trader.brokers.paper.accounting import margin_required, pnl_quote, weighted_entry
 from trader.brokers.ratelimit import TokenBucket
 from trader.brokers.registry import BrokerDeps, BrokerRegistry, default_registry, paper_settings
 from trader.config.settings import AccountConfig
 from trader.domain import Side, Tick
+from trader.domain.accounting import margin_required, pnl_quote, weighted_entry
 from trader.domain.errors import ConfigError, ConversionUnavailable
 from trader.domain.fx import conversion_rate
 from trader.domain.time import FixedClock

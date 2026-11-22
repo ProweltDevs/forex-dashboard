@@ -28,6 +28,7 @@ from decimal import Decimal
 from trader.brokers.base import Broker, BrokerAck, OrderChanges
 from trader.domain.enums import (
     ConnectionState,
+    KillLevel,
     OrderStatus,
     OrderType,
     PositionChange,
@@ -53,6 +54,7 @@ from trader.domain.events import (
     PositionEvent,
     ReconcileEvent,
     RiskEvent,
+    RiskStateEvent,
 )
 from trader.domain.ids import new_client_order_id
 from trader.domain.models import (
@@ -69,7 +71,7 @@ from trader.domain.money import ZERO
 from trader.domain.time import Clock, ensure_utc, from_epoch_ms, to_epoch_ms
 from trader.marketdata.bus import Bus
 from trader.observability.logging import get_logger
-from trader.risk.gate import AccountView, RiskGate
+from trader.risk.gate import AccountView, RiskGate, RiskOutput
 
 from . import codec
 from .emulation import Action, CancelOrder, ClosePosition, EmulationEngine, ModifyStop, SendStopLimit
@@ -240,6 +242,7 @@ class OrderManager:
     async def _on_timer(self) -> None:
         now = self._now()
         await self._execute(self.emulation.on_time(now))
+        self._apply_risk(self._risk.on_time(self.view()))
         if (
             self._connected
             and self.ready.is_set()
@@ -253,6 +256,23 @@ class OrderManager:
 
     def _publish(self, event: DomainEvent) -> None:
         self.events.publish(event)
+        if not isinstance(event, RiskEvent | RiskStateEvent):
+            self._apply_risk(self._risk.observe(event, self.view()))
+
+    def _apply_risk(self, out: RiskOutput) -> None:
+        """Act on a risk hook's output (on the writer). Cancels and closes are fire-and-forget; the engine
+        re-asserts them while anything is left."""
+        if out.changed:
+            self._dirty = True
+        for event in out.events:
+            self.events.publish(event)
+        if out.cancel_pending:
+            for tracked in list(self._orders.values()):
+                if tracked.order.status in (S.ACCEPTED, S.WORKING, S.PARTIALLY_FILLED):
+                    self._spawn_cancel(tracked, f"kill switch {self._risk.level}")
+        if out.flatten:
+            for pos in list(self._positions.values()):
+                self._spawn_close(pos.position_id, None, f"kill switch {self._risk.level}")
 
     # ================================================================== persistence
 
@@ -282,6 +302,7 @@ class OrderManager:
             fill_ids=list(self._fill_ids)[-self._s.keep_fill_ids :],
             emulations=self.emulation.dump(),
             positions=[codec.position_to_json(p) for p in self._positions.values()],
+            risk=self._risk.dump(),
         )
 
     async def _persist(self) -> None:
@@ -311,6 +332,7 @@ class OrderManager:
         self._fill_ids = dict.fromkeys(state.fill_ids)
         self._positions = {p["position_id"]: codec.position_from_json(p) for p in state.positions}  # type: ignore[misc]
         self.emulation.load(state.emulations)
+        self._risk.load(state.risk)
         _log.info(
             "oms_restored",
             account=self._s.account_id,
@@ -380,6 +402,29 @@ class OrderManager:
         """Cancel every pending order and close every position of the account."""
         return await self.close_all()
 
+    @property
+    def risk_level(self) -> KillLevel:
+        return self._risk.level
+
+    async def kill_switch(self, level: KillLevel, reason: str) -> KillLevel:
+        """Manual kill switch (API/CLI): PAUSE_NEW blocks entries, CANCEL_PENDING also cancels pending
+        orders, FLATTEN_ALL also closes every position. Stays on until ``reset_kill_switch``."""
+
+        async def job() -> KillLevel:
+            self._apply_risk(self._risk.kill(level, reason, self.view()))
+            return self._risk.level
+
+        return await self._call(job)
+
+    async def reset_kill_switch(self, reason: str) -> KillLevel:
+        """Clear the manual switch and latched breakers. Conditions that still hold trigger again."""
+
+        async def job() -> KillLevel:
+            self._apply_risk(self._risk.reset(reason, self.view()))
+            return self._risk.level
+
+        return await self._call(job)
+
     async def reconcile(self, reason: str = "requested") -> bool:
         return await self._call(lambda: self._reconcile(reason))
 
@@ -390,6 +435,7 @@ class OrderManager:
 
     def on_tick(self, tick: Tick) -> None:
         self._last_ticks[tick.symbol] = tick
+        self._risk.on_tick(tick)
         if tick.symbol in self.emulation.symbols():
             self._post(lambda: self._emulate_tick(tick))
 

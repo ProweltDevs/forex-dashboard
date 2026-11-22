@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from .codec import JsonObj, JsonValue
+from trader.domain.jsontypes import JsonObj, JsonValue
 
 SCHEMA = "oms/1"
 
@@ -26,6 +26,7 @@ class OmsState:
     fill_ids: list[str] = field(default_factory=list)
     emulations: list[JsonObj] = field(default_factory=list)
     positions: list[JsonObj] = field(default_factory=list)
+    risk: JsonObj = field(default_factory=dict)  # RiskGate.dump(): kill switch, day start, equity peak
 
     def to_json(self) -> dict[str, JsonValue]:
         return {
@@ -35,6 +36,7 @@ class OmsState:
             "fill_ids": list(self.fill_ids),
             "emulations": list(self.emulations),
             "positions": list(self.positions),
+            "risk": dict(self.risk),
         }
 
     @classmethod
@@ -46,17 +48,20 @@ class OmsState:
         emus = data.get("emulations") or []
         pos = data.get("positions") or []
         strat = data.get("position_strategy") or {}
+        risk = data.get("risk") or {}
         assert isinstance(orders, list)
         assert isinstance(fills, list)
         assert isinstance(emus, list)
         assert isinstance(pos, list)
         assert isinstance(strat, dict)
+        assert isinstance(risk, dict)
         return cls(
             orders=[o for o in orders if isinstance(o, dict)],
             position_strategy={str(k): str(v) for k, v in strat.items()},
             fill_ids=[str(f) for f in fills],
             emulations=[e for e in emus if isinstance(e, dict)],
             positions=[p for p in pos if isinstance(p, dict)],
+            risk=risk,
         )
 
 
