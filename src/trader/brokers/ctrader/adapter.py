@@ -14,7 +14,7 @@ import contextlib
 import random
 import ssl
 import time
-from collections.abc import AsyncIterator, Coroutine, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -466,30 +466,66 @@ class CTraderBroker:
         return None
 
     async def _order_history(self, start_ms: int, end_ms: int) -> list[model.ProtoOAOrder]:
-        """All orders updated in [start, end]. Responses are chunked (``hasMore``) with no documented order
-        or cursor, so a truncated window is bisected until every slice is complete. Past the request budget
-        this raises instead of returning a partial answer (the caller would resend on a miss)."""
-        out: list[model.ProtoOAOrder] = []
-        windows = [(start_ms, end_ms)]
-        budget = _HISTORY_MAX_REQUESTS
-        while windows:
-            lo, hi = windows.pop()
-            if budget == 0:
-                raise BrokerUnavailable("ctrader order history too dense to search exactly; retry later")
-            budget -= 1
+        """All orders updated in [start, end] (exact: raises rather than return a partial answer)."""
+
+        async def fetch(lo: int, hi: int) -> tuple[list[model.ProtoOAOrder], bool]:
             res = await self._req(
                 msgs.ProtoOAOrderListReq(ctidTraderAccountId=self._ctid(), fromTimestamp=lo, toTimestamp=hi),
                 msgs.ProtoOAOrderListRes,
                 historical=True,
             )
-            if not res.hasMore:
-                out.extend(res.order)
-            elif hi <= lo:
-                raise BrokerUnavailable("ctrader order history: more than one chunk within a millisecond")
-            else:
-                mid = (lo + hi) // 2
-                windows += [(mid + 1, hi), (lo, mid)]
-        return out
+            return list(res.order), res.hasMore
+
+        return await _bisect_history("order", fetch, start_ms, end_ms)
+
+    async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+        """Executed deals in [start, end) from ``ProtoOADealListReq`` (exact; oldest first)."""
+
+        async def fetch(lo: int, hi: int) -> tuple[list[model.ProtoOADeal], bool]:
+            res = await self._req(
+                msgs.ProtoOADealListReq(ctidTraderAccountId=self._ctid(), fromTimestamp=lo, toTimestamp=hi),
+                msgs.ProtoOADealListRes,
+                historical=True,
+            )
+            return list(res.deal), res.hasMore
+
+        lo, hi = to_epoch_ms(ensure_utc(start)), to_epoch_ms(ensure_utc(end)) - 1
+        deals = {d.dealId: d for d in await _bisect_history("deal", fetch, lo, hi)}
+        by_order = {oid: cid for cid, oid in self._cid_to_order.items()}
+        fills = [
+            fill
+            for d in deals.values()
+            if (fill := self._fill_from_deal(d, by_order.get(str(d.orderId)))) is not None
+            and start <= fill.ts < end
+        ]
+        return sorted(fills, key=lambda f: (f.ts, f.fill_id))
+
+    def _fill_from_deal(self, deal: model.ProtoOADeal, client_order_id: str | None) -> Fill | None:
+        """A FILLED/PARTIALLY_FILLED deal as a Fill. Money uses the deal's moneyDigits; a closing deal carries
+        gross profit, swap and the balance after it (``closePositionDetail``)."""
+        if deal.dealStatus not in (model.FILLED, model.PARTIALLY_FILLED):
+            return None
+        info = self._by_id.get(deal.symbolId)
+        if info is None:
+            return None
+        digits_money = deal.moneyDigits or (self._trader.moneyDigits if self._trader else 2)
+        close = deal.closePositionDetail if deal.HasField("closePositionDetail") else None
+        close_digits = (close.moneyDigits or digits_money) if close else digits_money
+        return Fill(
+            fill_id=str(deal.dealId),
+            client_order_id=client_order_id or None,
+            broker_order_id=str(deal.orderId),
+            position_id=str(deal.positionId),
+            symbol=info.instrument.symbol,
+            side=mp.side_from_wire(deal.tradeSide),
+            volume=mp.lots_from_wire(deal.filledVolume, info.lot_size),
+            price=mp.price_from_double(deal.executionPrice, info.instrument.digits),
+            ts=from_epoch_ms(deal.executionTimestamp),
+            commission=mp.money(deal.commission, digits_money),
+            swap=mp.money(close.swap, close_digits) if close else ZERO,
+            realized_pnl=mp.money(close.grossProfit, close_digits) if close else None,
+            balance_after=mp.money(close.balance, close_digits) if close else None,
+        )
 
     async def limits(self) -> RateLimits:
         return RateLimits(buckets=(LIMIT_REQUESTS, LIMIT_HISTORICAL))
@@ -841,31 +877,11 @@ class CTraderBroker:
         )
 
     def _handle_deal(self, ev: msgs.ProtoOAExecutionEvent, now: datetime) -> None:
-        deal = ev.deal
-        if deal.dealStatus not in (model.FILLED, model.PARTIALLY_FILLED):
-            return
-        info = self._by_id.get(deal.symbolId)
-        if info is None:
-            return
-        digits_money = deal.moneyDigits or (self._trader.moneyDigits if self._trader else 2)
-        close = deal.closePositionDetail if deal.HasField("closePositionDetail") else None
         internal = ev.HasField("order") and mp.is_internal_order(ev.order)
         cid = ev.order.clientOrderId if ev.HasField("order") and not internal else ""
-        fill = Fill(
-            fill_id=str(deal.dealId),
-            client_order_id=cid or None,
-            broker_order_id=str(deal.orderId),
-            position_id=str(deal.positionId),
-            symbol=info.instrument.symbol,
-            side=mp.side_from_wire(deal.tradeSide),
-            volume=mp.lots_from_wire(deal.filledVolume, info.lot_size),
-            price=mp.price_from_double(deal.executionPrice, info.instrument.digits),
-            ts=from_epoch_ms(deal.executionTimestamp),
-            commission=mp.money(deal.commission, digits_money),
-            swap=mp.money(close.swap, close.moneyDigits or digits_money) if close else ZERO,
-            realized_pnl=mp.money(close.grossProfit, close.moneyDigits or digits_money) if close else None,
-        )
-        self._emit_trade(FillEvent(account_id=self._s.account_id, fill=fill, ts=now))
+        fill = self._fill_from_deal(ev.deal, cid or None)
+        if fill is not None:
+            self._emit_trade(FillEvent(account_id=self._s.account_id, fill=fill, ts=now))
 
     def _handle_position(self, wire: model.ProtoOAPosition, now: datetime) -> None:
         info = self._by_id.get(wire.tradeData.symbolId)
@@ -934,3 +950,28 @@ class CTraderBroker:
             and not isinstance(exc, BrokerError)
         ):
             _log.error("ctrader_task_error", error=repr(exc))
+
+
+async def _bisect_history[T](
+    what: str, fetch: Callable[[int, int], Awaitable[tuple[list[T], bool]]], start_ms: int, end_ms: int
+) -> list[T]:
+    """Everything in [start, end] from a chunked history request (``hasMore``, no documented order or cursor):
+    a truncated window is bisected until every slice is complete. Past the request budget this raises
+    instead of returning a partial answer (callers would act on a false "not found")."""
+    out: list[T] = []
+    windows = [(start_ms, end_ms)]
+    budget = _HISTORY_MAX_REQUESTS
+    while windows:
+        lo, hi = windows.pop()
+        if budget == 0:
+            raise BrokerUnavailable(f"ctrader {what} history too dense to search exactly; retry later")
+        budget -= 1
+        items, more = await fetch(lo, hi)
+        if not more:
+            out.extend(items)
+        elif hi <= lo:
+            raise BrokerUnavailable(f"ctrader {what} history: more than one chunk within a millisecond")
+        else:
+            mid = (lo + hi) // 2
+            windows += [(mid + 1, hi), (lo, mid)]
+    return out

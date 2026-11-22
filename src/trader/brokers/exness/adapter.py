@@ -75,6 +75,7 @@ from .ws import Stream
 _log = get_logger("trader.brokers.exness")
 
 _OPEN_KINDS = frozenset({"open", "pending"})
+_HISTORY_MAX_PAGES = 50  # x 200 records per page
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1128,28 +1129,51 @@ class ExnessBroker:
         _log.info("exness_operation_recovered", key=key, order_id=oid)
 
     async def _history(
-        self, rest: RestClient, kind: str, since: datetime, instrument: str, **filters: str
+        self,
+        rest: RestClient,
+        kind: str,
+        since: datetime,
+        instrument: str | None = None,
+        *,
+        until: datetime | None = None,
+        **filters: str,
     ) -> list[Json]:
-        """``GET /v1/history/accounts/{id}/{orders|deals}`` from ``since`` to now, following cursors (a cursor
-        cannot be combined with filters, only ``limit``). Returns the bare order/deal objects."""
+        """``GET /v1/history/accounts/{id}/{orders|deals}`` for [since, until) (until = now if omitted),
+        following cursors (a cursor cannot be combined with filters, only ``limit``). Returns the bare
+        order/deal objects. Never truncates: past the page budget it raises."""
         op = "getOrdersHistory" if kind == "orders" else "getDealsHistory"
         path = f"/v1/history/accounts/{self._acct()}/{kind}"
         item_key = kind[:-1]
-        params: list[tuple[str, str]] = [
-            ("from", mp.iso(since)),
-            ("instrument", instrument),
-            ("limit", "200"),
-            *filters.items(),
-        ]
+        params: list[tuple[str, str]] = [("from", mp.iso(since)), ("limit", "200")]
+        if until is not None:
+            params.append(("to", mp.iso(until)))
+        if instrument is not None:
+            params.append(("instrument", instrument))
+        params.extend(filters.items())
         out: list[Json] = []
-        for _ in range(10):  # 2000 records in a ~minute window is far beyond one account's activity
+        for _ in range(_HISTORY_MAX_PAGES):
             res = await rest.get(op, path, params)
             out.extend(i[item_key] for i in res.get("items") or [] if isinstance(i.get(item_key), dict))
             cursor = res.get("next_cursor")
             if not res.get("has_more") or not cursor:
-                break
+                return out
             params = [("cursor", str(cursor)), ("limit", "200")]
-        return out
+        raise BrokerUnavailable(
+            f"exness {kind} history: more than {_HISTORY_MAX_PAGES} pages; narrow the window"
+        )
+
+    async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+        """Trade deals (``open``/``close``) executed in [start, end), oldest first. Balance-type deals
+        (deposits, fees, swaps charged as balance operations) are not fills and are skipped."""
+        rest = self._require_rest()
+        fills = []
+        for d in await self._history(rest, "deals", start, until=end):
+            if d.get("type") not in ("open", "close"):
+                continue
+            fill = self._fill_from_deal(d, [], None)
+            if fill is not None and start <= fill.ts < end:
+                fills.append(fill)
+        return sorted(fills, key=lambda f: (f.ts, f.fill_id))
 
     def _spawn(self, coro: Coroutine[None, None, None]) -> None:
         task = asyncio.create_task(coro)

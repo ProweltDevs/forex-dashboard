@@ -15,12 +15,14 @@ from .enums import (
 )
 from .events import (
     AccountEvent,
+    AlertEvent,
     BarEvent,
     ConnectionEvent,
     DomainEvent,
     FeedEvent,
     FillEvent,
     OrderEvent,
+    OrderRetryEvent,
     PositionEvent,
     ReconcileEvent,
     RiskEvent,
@@ -46,6 +48,7 @@ from .models import (
 __all__ = [
     "AccountEvent",
     "AccountState",
+    "AlertEvent",
     "Bar",
     "BarEvent",
     "BrokerSnapshot",
@@ -62,6 +65,7 @@ __all__ = [
     "OrderEvent",
     "OrderIntent",
     "OrderRequest",
+    "OrderRetryEvent",
     "OrderStatus",
     "OrderType",
     "Position",

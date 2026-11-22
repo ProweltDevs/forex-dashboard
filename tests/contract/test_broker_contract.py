@@ -276,3 +276,52 @@ async def test_find_order_by_client_order_id(harness: ContractHarness) -> None:
     assert open_view.status is OrderStatus.WORKING
     assert await broker.find_order("01NEVERSENTNEVERSENTNEVER0", since) is None
     assert isinstance(broker.capabilities.idempotent_submit, bool)
+
+
+async def test_deal_history_is_the_statement(harness: ContractHarness) -> None:
+    """``deal_history`` returns exactly the fills the event stream delivered (same ids), and their net
+    (realized gross + commission + swap) explains the balance change: the broker statement for the trades.
+    On a demo account this also settles how the broker reports commission and swap (docs/brokers/*.md)."""
+    from datetime import UTC, datetime, timedelta
+
+    broker = harness.broker
+    inst = await harness.instrument()
+    start = datetime.now(UTC) - timedelta(seconds=5)
+    before = (await broker.account()).balance
+    mark = harness.recorder.mark
+    req = harness.request(Side.BUY, inst.min_volume)
+    await broker.place_order(req)
+    opened = (await harness.fill_for(req.client_order_id, after=mark)).fill
+    await broker.close_position(opened.position_id)
+    closed = (
+        await harness.recorder.wait_for(
+            FillEvent,
+            lambda e: e.fill.position_id == opened.position_id and e.fill.realized_pnl is not None,
+            after=mark,
+        )
+    ).fill
+    deadline = time.monotonic() + 10
+    while (after := (await broker.account()).balance) == before and time.monotonic() < deadline:
+        await asyncio.sleep(0.2)  # some brokers publish the new balance a moment after the deal
+    history = await broker.deal_history(start, datetime.now(UTC) + timedelta(seconds=5))
+    ours = [f for f in history if f.position_id == opened.position_id]
+    assert {f.fill_id for f in ours} == {opened.fill_id, closed.fill_id}
+    by_id = {f.fill_id: f for f in ours}
+    for live in (opened, closed):
+        hist = by_id[live.fill_id]
+        assert (hist.side, hist.volume, hist.price, hist.realized_pnl, hist.commission, hist.swap) == (
+            live.side,
+            live.volume,
+            live.price,
+            live.realized_pnl,
+            live.commission,
+            live.swap,
+        )
+    net = sum((f.net for f in ours), Decimal(0))
+    print(
+        f"\n[statement] deals net={net} balance change={after - before} "
+        f"(gross={closed.realized_pnl} commission={opened.commission}+{closed.commission} swap={closed.swap})"
+    )
+    assert abs((after - before) - net) <= Decimal("0.01") * len(ours)
+    if closed.balance_after is not None:
+        assert abs(closed.balance_after - after) <= Decimal("0.01")

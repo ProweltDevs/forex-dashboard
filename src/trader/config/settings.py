@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -212,12 +213,30 @@ class StrategyConfig(_Model):
         return value
 
 
+class PortfolioConfig(_Model):
+    """P&L tracking (SPEC §9): equity sampling and the computed-vs-broker drift check."""
+
+    equity_sample_s: int = Field(default=60, ge=1)  # plus a sample on every fill
+    drift_pct: Decimal = Field(default=Decimal("0.5"), gt=0)  # of broker equity
+    drift_min: Decimal = Field(default=Decimal("1"), ge=0)  # account currency: never alert below this
+    balance_grace_s: int = Field(default=10, ge=1)
+
+    @property
+    def equity_sample(self) -> timedelta:
+        return timedelta(seconds=self.equity_sample_s)
+
+    @property
+    def balance_grace(self) -> timedelta:
+        return timedelta(seconds=self.balance_grace_s)
+
+
 class AppConfig(_Model):
     mode: TradingMode = TradingMode.PAPER
     data_dir: Path = Path("data")
     logging: LoggingConfig = LoggingConfig()
     database: DatabaseConfig | None = None
     market_data: MarketDataConfig = MarketDataConfig()
+    portfolio: PortfolioConfig = PortfolioConfig()
     accounts: tuple[AccountConfig, ...] = ()
     strategies: tuple[StrategyConfig, ...] = ()
 

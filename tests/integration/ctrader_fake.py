@@ -55,7 +55,8 @@ class FakeCTraderServer:
         self.orders: dict[int, model.ProtoOAOrder] = {}
         self.client_ids: dict[str, int] = {}
         self.history: list[model.ProtoOAOrder] = []  # finished orders, for ProtoOAOrderListReq
-        self.history_chunk = 1000  # records per ProtoOAOrderListRes before hasMore
+        self.history_chunk = 1000  # records per ProtoOAOrderListRes / ProtoOADealListRes before hasMore
+        self.deals: list[model.ProtoOADeal] = []  # for ProtoOADealListReq
         self.history_requests = 0
         self.received: list[str] = []
         self.refreshes = 0
@@ -269,6 +270,12 @@ class FakeCTraderServer:
                     positionId=pos.positionId, grossUnrealizedPnL=pnl, netUnrealizedPnL=pnl
                 )
             self._send(conn, res, mid)
+        elif isinstance(m, msgs.ProtoOADealListReq):
+            self.history_requests += 1
+            found = [d for d in self.deals if m.fromTimestamp <= d.executionTimestamp <= m.toTimestamp]
+            res = msgs.ProtoOADealListRes(ctidTraderAccountId=ctid, hasMore=len(found) > self.history_chunk)
+            res.deal.extend(found[: self.history_chunk])
+            self._send(conn, res, mid)
         elif isinstance(m, msgs.ProtoOAOrderListReq):
             self.history_requests += 1
             found = [o for o in self.history if m.fromTimestamp <= o.utcLastUpdateTimestamp <= m.toTimestamp]
@@ -405,6 +412,8 @@ class FakeCTraderServer:
             filledVolume=m.volume, symbolId=m.symbolId, createTimestamp=now, executionTimestamp=now,
             executionPrice=price, tradeSide=m.tradeSide, dealStatus=model.FILLED, commission=-30, moneyDigits=2,
         )  # fmt: skip
+        self.balance_cents -= 30  # commission is charged on each deal
+        self.deals.append(deal)
         self.history.append(order)
         self._send(conn, self._exec(model.ORDER_FILLED, order=order, position=pos, deal=deal))
 
@@ -433,7 +442,7 @@ class FakeCTraderServer:
         price = (self.bid if side == model.SELL else self.ask) / 100_000
         full_pnl = self._pnl_cents(pos)
         gross = round(full_pnl * m.volume / pos.tradeData.volume)
-        self.balance_cents += gross
+        self.balance_cents += gross - 30  # gross profit, minus this deal's commission
         pos.tradeData.volume -= m.volume
         if pos.tradeData.volume == 0:
             pos.positionStatus = model.POSITION_STATUS_CLOSED
@@ -450,4 +459,5 @@ class FakeCTraderServer:
                 closedVolume=m.volume, moneyDigits=2,
             ),
         )  # fmt: skip
+        self.deals.append(deal)
         self._send(conn, self._exec(model.ORDER_FILLED, order=closing, position=pos, deal=deal))

@@ -4,6 +4,8 @@
     trader check-config --config <file> [--confirm-live]
     trader kill --config <file> --account <id> (--level PAUSE_NEW|CANCEL_PENDING|FLATTEN_ALL | --reset)
                 --reason <text> [--timeout 60] [--confirm-live]
+    trader report --config <file> --account <id> [--date YYYY-MM-DD]      # daily report from stored books
+    trader pnl-check --config <file> --account <id> [--date YYYY-MM-DD]   # our ledger vs broker statement
     trader ctrader-auth [--environment demo] [--secrets-ref CTRADER_DEMO] [--redirect-uri URL]
     trader secrets-key            # create TRADER_SECRETS_KEY in .env (encrypts stored broker tokens)
 
@@ -20,18 +22,20 @@ import re
 import signal
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from trader import __version__
-from trader.app import App, RunReport, build_account, kill_account, risk_summary, run_app
+from trader.analytics.books import offline_report
+from trader.app import App, RunReport, build_account, kill_account, risk_summary, run_app, run_pnl_check
 from trader.config.loader import load_config, resolve_mode
 from trader.config.secrets import read_env_file, update_env_file
-from trader.config.settings import AppConfig
+from trader.config.settings import AccountConfig, AppConfig
 from trader.domain.enums import KillLevel, TradingMode
 from trader.domain.errors import BrokerError, ConfigError
 from trader.domain.time import SystemClock
 from trader.observability.logging import configure_logging, get_logger
+from trader.portfolio.ledger import trading_day
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -56,6 +60,15 @@ def _parser() -> argparse.ArgumentParser:
     kill.add_argument("--reason", required=True, help="recorded with the decision")
     kill.add_argument("--timeout", type=float, default=60.0, help="seconds to wait for cancels/closes")
     kill.add_argument("--confirm-live", action="store_true", help="required for live accounts")
+    for name, help_text in (
+        ("report", "write a trading day's report (JSON + CSV) from the stored books"),
+        ("pnl-check", "compare our fill ledger with the broker's deal statement for a trading day"),
+    ):
+        cmd = sub.add_parser(name, help=help_text)
+        cmd.add_argument("--config", type=Path, required=True, help="path to YAML config")
+        cmd.add_argument("--account", required=True, help="account id from the config")
+        cmd.add_argument("--date", type=date.fromisoformat, default=None, help="trading day (default: today)")
+        cmd.add_argument("--confirm-live", action="store_true", help="required for live accounts")
     for name, help_text in (
         ("run", "start the trading process"),
         ("check-config", "validate a config file and the trading-mode safety rules"),
@@ -112,6 +125,38 @@ def _kill(args: argparse.Namespace, config: AppConfig, env: Mapping[str, str]) -
         f"pending_left={result.orders_left} {'done' if result.done else 'NOT DONE (timeout)'}"
     )
     return 0 if result.done else 1
+
+
+def _report(config: AppConfig, account: AccountConfig, day: date) -> int:
+    report, paths = offline_report(config.data_dir, account, day)
+    pnl, trades = report["pnl"], report["trades"]
+    assert isinstance(pnl, dict)
+    assert isinstance(trades, dict)
+    realized = pnl["realized"]
+    assert isinstance(realized, dict)
+    print(
+        f"{account.id} {day.isoformat()}: realized net {realized['net']} over {realized['deals']} deals, "
+        f"{trades['trades']} trades, win rate {trades['win_rate']}"
+    )
+    for path in paths:
+        print(f"  wrote {path}")
+    return 0
+
+
+def _pnl_check(config: AppConfig, account: AccountConfig, day: date, env: Mapping[str, str]) -> int:
+    if account.broker == "paper":
+        print(
+            "pnl-check needs a broker account (paper deals exist only inside the trading process)",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        check = asyncio.run(run_pnl_check(config, account, day, env=env, clock=SystemClock()))
+    except (ConfigError, BrokerError) as exc:
+        print(f"pnl-check failed: {exc}", file=sys.stderr)
+        return 2
+    print("\n".join(check.lines()))
+    return 0 if check.ok else 1
 
 
 def _secrets_key(env_file: Path, env: Mapping[str, str]) -> int:
@@ -174,6 +219,15 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 
     if args.command == "kill":
         return _kill(args, config, merged)
+    if args.command in ("report", "pnl-check"):
+        account = next((a for a in config.accounts if a.id == args.account), None)
+        if account is None:
+            print(f"unknown account {args.account!r}", file=sys.stderr)
+            return 2
+        day = args.date or trading_day(datetime.now(UTC), account.risk.day_offset_minutes)
+        if args.command == "report":
+            return _report(config, account, day)
+        return _pnl_check(config, account, day, merged)
 
     if mode is TradingMode.LIVE:
         print(live_banner(config), file=sys.stderr)

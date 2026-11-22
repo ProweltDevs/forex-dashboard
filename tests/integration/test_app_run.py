@@ -8,6 +8,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -194,3 +195,168 @@ def test_config_rejects_strategies_on_data_sources_and_bad_symbols(tmp_path: Pat
     dup["strategies"][1]["id"] = "ema"
     with pytest.raises(ValueError, match="unique"):
         AppConfig.model_validate(dup)
+
+
+async def test_portfolio_matches_the_broker_statement_and_writes_the_books(tmp_path: Path) -> None:
+    """Phase 8 on paper: the ledger built from live fills equals the broker's deal history (pnl-check),
+    and the books (fills, equity, journal, executions, daily report) are written."""
+    from datetime import UTC, datetime
+
+    from trader.analytics.statement import compare, day_window
+
+    config = synthetic_config(tmp_path)
+    app = App(config, env={}, clock=SystemClock())
+    await app.start()
+    try:
+        books = app.books["paper-main"]
+        for _ in range(400):  # until a round trip closed
+            if books.journal.closed:
+                break
+            await asyncio.sleep(0.05)
+        assert books.journal.closed
+        await asyncio.sleep(0.3)  # let in-flight fills land
+        day = books.portfolio.ledger_day(datetime.now(UTC))
+        start, end = day_window(day, 0)
+        broker = await app.accounts["paper-main"].broker.deal_history(start, end)
+        ours = [e.fill for e in books.portfolio.ledger.entries(day=day)]
+        check = compare(day, ours, broker)
+        assert check.ok, check.lines()
+        assert check.chain_checked > 0  # paper reports the balance after every deal
+        point = books.portfolio.sample(datetime.now(UTC))
+        assert point is not None
+        acct = app.accounts["paper-main"].oms.view().account
+        assert acct is not None
+        assert abs(point.balance - acct.balance) <= Decimal("0.01") * len(ours)  # computed = broker balance
+        trade = books.journal.closed[0]
+        assert trade.strategy_id in {"ema", "donchian", "rsi"}
+        assert trade.params_hash
+        assert trade.initial_sl is not None
+        assert trade.risk is not None
+        assert books.executions.records
+        rec = books.executions.records[0]
+        assert rec.latency_ms("total") is not None
+        assert rec.slippage_points is not None
+        deals = len(books.portfolio.ledger)
+    finally:
+        await app.stop()
+    portfolio = tmp_path / "portfolio" / "paper-main"
+    assert (portfolio / "fills.jsonl").read_text().count("\n") >= deals > 0
+    assert list(portfolio.glob("equity-*.jsonl"))
+    assert (tmp_path / "journal" / "paper-main" / "trades.jsonl").exists()
+    assert (tmp_path / "executions" / "paper-main.jsonl").exists()
+    report = json.loads((tmp_path / "reports" / "paper-main" / f"{day.isoformat()}.json").read_text())
+    assert report["trades"]["trades"] >= 1
+    assert report["execution"]["overall"]["orders"] >= 1
+    assert "approved" in report["risk"]
+
+
+async def test_pnl_check_against_a_real_adapter_and_report_cli(
+    ctrader: FakeCTraderServer, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """cTrader (fake): trade a round trip through the OMS, stop, then `pnl-check` the day against the broker's
+    deal statement (incl. the balance chain from closing deals) and build the report from stored books."""
+    from datetime import UTC, datetime
+
+    from trader.app import run_pnl_check
+    from trader.brokers.ctrader import TokenStore
+    from trader.cli import main
+    from trader.domain import OrderIntent, OrderType, Side
+
+    config = AppConfig.model_validate(
+        {
+            "mode": "demo",
+            "data_dir": str(tmp_path),
+            "market_data": {"timeframes": ["S1"], "warmup_bars": 0},
+            "accounts": [
+                {
+                    "id": "ct",
+                    "broker": "ctrader",
+                    "environment": "demo",
+                    "account_id": str(ctrader.ctid),
+                    "secrets_ref": "CT_DEMO",
+                    "symbols": ["EURUSD"],
+                    "ctrader": {"host": "127.0.0.1", "port": ctrader.port, "use_tls": False},
+                    "risk": FAST_RISK,
+                },
+            ],
+        }
+    )
+    # cTrader rotates OAuth tokens: the key lets the token store hand them to the next process (pnl-check).
+    env = {
+        "CT_DEMO_CLIENT_ID": ctrader.client_id,
+        "CT_DEMO_CLIENT_SECRET": ctrader.client_secret,
+        "CT_DEMO_ACCESS_TOKEN": ctrader.access_token,
+        "CT_DEMO_REFRESH_TOKEN": ctrader.refresh_token,
+        "TRADER_SECRETS_KEY": TokenStore.generate_key(),
+    }
+    app = App(config, env=env, clock=SystemClock())
+    await app.start()
+    try:
+        oms, books = app.accounts["ct"].oms, app.books["ct"]
+        for _ in range(100):
+            if "EURUSD" in oms.view().last_ticks:
+                break
+            await asyncio.sleep(0.05)
+        bid = oms.view().last_ticks["EURUSD"].bid
+        order = await oms.submit(
+            OrderIntent(
+                symbol="EURUSD",
+                side=Side.BUY,
+                order_type=OrderType.MARKET,
+                volume=Decimal("0.10"),
+                strategy_id="manual-test",
+                strategy_version="1",
+                signal_ts=datetime.now(UTC),
+                sl=bid - Decimal("0.00300"),
+            )
+        )
+        assert order.rejection_reason is None, order.rejection_reason
+        for _ in range(100):
+            if oms.positions():
+                break
+            await asyncio.sleep(0.05)
+        await oms.close_position(oms.positions()[0].position_id)
+        for _ in range(100):
+            if books.journal.closed:
+                break
+            await asyncio.sleep(0.05)
+        [trade] = books.journal.closed
+        assert (trade.strategy_id, trade.commission) == ("manual-test", Decimal("-0.60"))
+    finally:
+        await app.stop()
+
+    day = trade.exit_time.date()
+    check = await run_pnl_check(config, config.accounts[0], day, env=env, clock=SystemClock())
+    assert check.ok, check.lines()
+    assert (check.broker.deals, check.chain_checked) == (2, 0)  # one closing deal: the chain needs two
+    assert check.ours.net == trade.net
+
+    fills = tmp_path / "portfolio" / "ct" / "fills.jsonl"
+    lines = fills.read_text().splitlines()
+    fills.write_text(lines[0] + "\n")  # lose the closing deal
+    broken = await run_pnl_check(config, config.accounts[0], day, env=env, clock=SystemClock())
+    assert not broken.ok
+    assert [f.realized_pnl is not None for f in broken.missing] == [True]
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(json.dumps(config.model_dump(mode="json", by_alias=True)))
+    assert (
+        main(
+            [
+                "--env-file",
+                str(tmp_path / "none.env"),
+                "report",
+                "--config",
+                str(cfg_file),
+                "--account",
+                "ct",
+                "--date",
+                day.isoformat(),
+            ],
+            env={},
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "1 trades" in out
+    assert (tmp_path / "reports" / "ct" / f"{day.isoformat()}-trades.csv").exists()
