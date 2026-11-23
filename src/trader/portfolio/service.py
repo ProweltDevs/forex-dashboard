@@ -116,6 +116,7 @@ class PortfolioService:
         self._drifting = False
         self._tasks: list[asyncio.Task[None]] = []
         self._backfilling: asyncio.Task[None] | None = None
+        self._oms_sub: Subscription[DomainEvent] | None = None
 
     # ================================================================== lifecycle
 
@@ -132,7 +133,10 @@ class PortfolioService:
         now = self._clock.now()
         last = self.ledger.last_ts()
         await self.backfill(last - timedelta(minutes=1) if last else now - self._s.backfill_lookback)
-        self._tasks.append(asyncio.create_task(self._consume_oms(), name=f"portfolio-{self.account_id}"))
+        self._oms_sub = self._oms.events.subscribe(f"portfolio-oms-{self.account_id}")
+        self._tasks.append(
+            asyncio.create_task(self._consume_oms(self._oms_sub), name=f"portfolio-{self.account_id}")
+        )
         if self._ticks is not None:
             sub = self._ticks.subscribe(
                 f"portfolio-{self.account_id}",
@@ -147,10 +151,20 @@ class PortfolioService:
         _log.info("portfolio_started", account=self.account_id, ledger=loaded, deals=len(self.ledger))
 
     async def stop(self) -> None:
+        """Apply what the OMS already published (a fill queued here must reach the ledger), then stop.
+        ``App.stop`` disconnects the brokers first, so this sees every fill up to the disconnect."""
         for task in [*self._tasks, *([self._backfilling] if self._backfilling else [])]:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        if self._oms_sub is not None:
+            while (event := self._oms_sub.get_nowait()) is not None:
+                try:
+                    self.on_event(event)
+                except Exception:
+                    _log.exception("portfolio_event_failed", account=self.account_id)
+            self._oms.events.unsubscribe(self._oms_sub)
+            self._oms_sub = None
         self.sample(self._clock.now())
         await self.flush()
 
@@ -187,8 +201,8 @@ class PortfolioService:
 
     # ================================================================== events
 
-    async def _consume_oms(self) -> None:
-        async for event in self._oms.events.subscribe(f"portfolio-oms-{self.account_id}"):
+    async def _consume_oms(self, sub: Subscription[DomainEvent]) -> None:
+        async for event in sub:
             try:
                 self.on_event(event)
             except Exception:

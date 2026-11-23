@@ -47,6 +47,7 @@ from trader.domain.errors import (
 )
 from trader.domain.events import (
     AccountEvent,
+    AlertEvent,
     ConnectionEvent,
     DomainEvent,
     FillEvent,
@@ -72,7 +73,7 @@ from trader.domain.money import ZERO
 from trader.domain.time import Clock, ensure_utc, from_epoch_ms, to_epoch_ms
 from trader.marketdata.bus import Bus
 from trader.observability.logging import get_logger
-from trader.risk.gate import AccountView, RiskGate, RiskOutput
+from trader.risk.gate import AccountView, RiskGate, RiskOutput, RiskVerdict
 
 from . import codec
 from .emulation import Action, CancelOrder, ClosePosition, EmulationEngine, ModifyStop, SendStopLimit
@@ -150,6 +151,7 @@ class OrderManager:
         self._last_ticks: dict[str, Tick] = {}
         self._connected = True
         self._dirty = False
+        self._owner = False  # holds the store's exclusive lock
         self._last_reconcile: datetime | None = None
         self.emulation = EmulationEngine(min_modify_interval=settings.min_modify_interval)
 
@@ -159,6 +161,8 @@ class OrderManager:
         """Restore persisted state and start the writer. Call ``reconcile("startup")`` next."""
         if self._writer is not None:
             return
+        await asyncio.to_thread(self._store.open)  # exclusive: one writer per account
+        self._owner = True
         state = await asyncio.to_thread(self._store.load)
         if state is not None:
             self._restore(state)
@@ -177,7 +181,10 @@ class OrderManager:
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
-        await self._persist()
+        if self._owner:  # never write state this process does not own (a refused start)
+            await self._persist()
+            await asyncio.to_thread(self._store.close)
+            self._owner = False
         self._writer = self._timer = None
         self.events.close()
 
@@ -188,6 +195,8 @@ class OrderManager:
         await asyncio.gather(
             *[t for t in (self._timer, self._writer, *self._tasks) if t], return_exceptions=True
         )
+        self._store.close()  # a dead process holds no lock
+        self._owner = False
         self._writer = self._timer = None
 
     async def _run(self) -> None:
@@ -790,6 +799,7 @@ class OrderManager:
             volume -= covered
         if volume > 0:
             self._fill(tracked, volume, fill.price, fill.ts)
+            self._check_slippage(tracked.order.request, fill)
         if fill.position_id and fill.side is tracked.order.request.side:
             tracked.position_id = fill.position_id
             self._pos_strategy.setdefault(fill.position_id, tracked.order.request.strategy_id)
@@ -801,6 +811,33 @@ class OrderManager:
             )
         )
         self._order_changed(tracked)
+
+    def _check_slippage(self, req: OrderRequest, fill: Fill) -> None:
+        """A fill cannot be undone, but a fill past the order's price protection must be seen: a STOP_LIMIT
+        filled beyond its limit (its triggered leg can go as MARKET, and not every broker or instrument
+        honours a slippage cap), or a MARKET order with ``max_slippage`` filled further than that from its
+        signal price."""
+        if fill.side is not req.side:
+            return
+        sign = req.side.sign
+        bound: Decimal | None = None
+        if req.order_type is OrderType.STOP_LIMIT and req.limit_price is not None:
+            bound = req.limit_price
+        elif req.order_type is OrderType.MARKET and req.max_slippage is not None and req.signal_price:
+            bound = req.signal_price + sign * req.max_slippage
+        if bound is None or (fill.price - bound) * sign <= 0:
+            return
+        beyond = abs(fill.price - bound)
+        self._publish(
+            AlertEvent(
+                account_id=self._s.account_id,
+                kind="slippage_exceeded",
+                severity="warning",
+                message=f"{req.strategy_id} {req.side} {fill.volume} {req.symbol} {req.order_type} filled at "
+                f"{fill.price}, {beyond} beyond its price limit {bound} ({req.client_order_id})",
+                ts=self._now(),
+            )
+        )
 
     def _attribute(self, pos: Position) -> Position:
         strategy = self._pos_strategy.get(pos.position_id)
@@ -908,10 +945,29 @@ class OrderManager:
 
     # ================================================================== manual / strategy commands
 
+    def _check_change(self, verdict: RiskVerdict, strategy_id: str, cid: str | None, what: str) -> None:
+        """Publish the risk decision on a modification; raise ``OrderRejected`` when it is refused."""
+        self._publish(
+            RiskEvent(
+                account_id=self._s.account_id,
+                decision=RiskDecision.APPROVED if verdict.approved else RiskDecision.REJECTED,
+                rule=verdict.rule,
+                reason=f"{what}: {verdict.reason}",
+                ts=self._now(),
+                strategy_id=strategy_id,
+                client_order_id=cid,
+            )
+        )
+        if not verdict.approved:
+            raise OrderRejected(f"risk:{verdict.rule}: {verdict.reason}")
+
     async def _do_modify(self, cid: str, changes: OrderChanges) -> BrokerAck | None:
         tracked = self._orders.get(cid)
         if tracked is None or tracked.order.status not in _OPEN:
             raise OrderNotFound(cid)
+        current = tracked.order.request
+        verdict = self._risk.pre_modify(current, _modified_intent(current, changes, self._now()), self.view())
+        self._check_change(verdict, current.strategy_id, cid, f"modify {cid}")
         stop_limit = self.emulation.stop_limit(cid)
         if stop_limit is not None and not stop_limit.triggered:
             r = tracked.order.request
@@ -950,6 +1006,8 @@ class OrderManager:
         pos = self._positions.get(pid)
         if pos is None:
             raise PositionNotFound(pid)
+        verdict = self._risk.pre_modify_position(pos, sl, self.view())
+        self._check_change(verdict, pos.strategy_id, None, f"modify position {pid}")
         if not self._broker.capabilities.native_sl_tp:
             self.emulation.arm_sl_tp(position_id=pid, symbol=pos.symbol, side=pos.side, sl=sl, tp=tp)
             self._dirty = True
@@ -1124,3 +1182,26 @@ class OrderManager:
 
 def _pos_str(p: Position) -> str:
     return f"{p.side.value} {p.volume} {p.symbol} @ {p.entry_price} sl={p.sl} tp={p.tp} [{p.strategy_id}]"
+
+
+def _modified_intent(current: OrderRequest, changes: OrderChanges, now: datetime) -> OrderIntent:
+    """The pending order as it would be after ``changes`` (what risk checks)."""
+    return OrderIntent(
+        symbol=current.symbol,
+        side=current.side,
+        order_type=current.order_type,
+        volume=changes.volume if changes.volume is not None else current.volume,
+        strategy_id=current.strategy_id,
+        strategy_version=current.strategy_version,
+        signal_ts=now,
+        limit_price=changes.limit_price if changes.limit_price is not None else current.limit_price,
+        stop_price=changes.stop_price if changes.stop_price is not None else current.stop_price,
+        sl=None if changes.remove_sl else (changes.sl if changes.sl is not None else current.sl),
+        tp=None if changes.remove_tp else (changes.tp if changes.tp is not None else current.tp),
+        time_in_force=current.time_in_force,
+        expiry=changes.expiry if changes.expiry is not None else current.expiry,
+        max_slippage=current.max_slippage,
+        tags=current.tags,
+        exits=current.exits,
+        oco_group=current.oco_group,
+    )

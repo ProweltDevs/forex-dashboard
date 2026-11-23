@@ -21,13 +21,13 @@ immediately on escalation and again every ``ENFORCE_EVERY`` while anything is le
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
 from trader.config.risk import RiskConfig
-from trader.domain.enums import ConnectionState, KillLevel, OrderStatus, Side
+from trader.domain.enums import ConnectionState, KillLevel, OrderStatus, OrderType, Side
 from trader.domain.events import (
     AccountEvent,
     ConnectionEvent,
@@ -38,13 +38,25 @@ from trader.domain.events import (
     RiskStateEvent,
 )
 from trader.domain.jsontypes import JsonObj, JsonValue
-from trader.domain.models import AccountState, OrderIntent, Tick
+from trader.domain.models import AccountState, OrderIntent, OrderRequest, Position, Tick
 from trader.domain.time import Clock, from_epoch_ms, to_epoch_ms
 from trader.observability.logging import get_logger
 
 from .gate import NOTHING, AccountView, RiskGate, RiskOutput, RiskVerdict
 from .market import ClockDrift, FeedClock, SpreadTracker
-from .rules import RULES, FlowStats, RuleInput, daily_loss_breach, drawdown_breach, in_weekend
+from .modify import order_change_adds_risk, stop_change_adds_risk
+from .rules import (
+    RULES,
+    FlowStats,
+    RuleInput,
+    check_loss_per_trade,
+    daily_loss_breach,
+    drawdown_breach,
+    in_weekend,
+)
+
+# Rate rules count new orders; a modification is not one.
+MODIFY_SKIPS = frozenset({"orders_per_minute", "order_to_fill", "duplicate_signal"})
 
 _log = get_logger("trader.risk")
 
@@ -113,8 +125,15 @@ class RiskEngine(RiskGate):
         self._note_equity(view.account, now)
         if self.level is not KillLevel.NONE:
             return RiskVerdict.reject("kill_switch", f"{self.level}: {self._summary()}")
+        verdict = self._evaluate(intent, view, now, skip=frozenset())
+        if verdict.approved:
+            self._orders.append((now, intent.strategy_id))
+            self._signals[(intent.strategy_id, intent.symbol, intent.side)] = now
+        return verdict
+
+    def _input(self, intent: OrderIntent, view: AccountView, now: datetime) -> RuleInput:
         limits = self._cfg.for_strategy(intent.strategy_id)
-        inp = RuleInput(
+        return RuleInput(
             intent=intent,
             view=view,
             limits=limits,
@@ -124,13 +143,56 @@ class RiskEngine(RiskGate):
             day_start_equity=self._day_start,
             peak_equity=self._peak,
         )
+
+    def _evaluate(
+        self, intent: OrderIntent, view: AccountView, now: datetime, *, skip: frozenset[str]
+    ) -> RiskVerdict:
+        inp = self._input(intent, view, now)
+        checked = 0
         for name, rule in RULES.items():
+            if name in skip:
+                continue
+            checked += 1
             why = rule(inp)
             if why is not None:
                 return RiskVerdict.reject(name, why)
-        self._orders.append((now, intent.strategy_id))
-        self._signals[(intent.strategy_id, intent.symbol, intent.side)] = now
-        return RiskVerdict.approve(rule="all_rules", reason=f"{len(RULES)} rules passed")
+        return RiskVerdict.approve(rule="all_rules", reason=f"{checked} rules passed")
+
+    def pre_modify(self, current: OrderRequest, modified: OrderIntent, view: AccountView) -> RiskVerdict:
+        """A change that adds risk (more volume, a new entry price, a stop removed or moved away) is checked
+        like a new order, except the rate rules (a modification is not a new order). Others always pass."""
+        if not order_change_adds_risk(current, modified):
+            return RiskVerdict.approve(rule="modify", reason="the change does not add risk")
+        now = self._now()
+        self._note_equity(view.account, now)  # as pre_trade: the daily-loss baseline
+        if self.level is not KillLevel.NONE:
+            return RiskVerdict.reject("kill_switch", f"{self.level}: {self._summary()}")
+        cid = current.client_order_id
+        others = replace(view, open_orders=tuple(o for o in view.open_orders if o.client_order_id != cid))
+        return self._evaluate(modified, others, now, skip=MODIFY_SKIPS)
+
+    def pre_modify_position(self, position: Position, sl: Decimal | None, view: AccountView) -> RiskVerdict:
+        """Removing a stop or moving it away from the market is checked (kill switch, ``require_sl``, loss
+        per trade from the current price); tightening, trailing and break-even always pass."""
+        if not stop_change_adds_risk(position, sl):
+            return RiskVerdict.approve(rule="modify_position", reason="the change does not add risk")
+        self._note_equity(view.account, self._now())
+        if self.level is not KillLevel.NONE:
+            return RiskVerdict.reject("kill_switch", f"{self.level}: {self._summary()}")
+        intent = OrderIntent(
+            symbol=position.symbol,
+            side=position.side,
+            order_type=OrderType.MARKET,
+            volume=position.volume,
+            strategy_id=position.strategy_id,
+            strategy_version="position",
+            signal_ts=self._now(),
+            sl=sl,
+        )
+        why = check_loss_per_trade(self._input(intent, view, self._now()))
+        if why is not None:
+            return RiskVerdict.reject("loss_per_trade", why)
+        return RiskVerdict.approve(rule="modify_position", reason="loss at the new stop within limits")
 
     def _flow(self, intent: OrderIntent, now: datetime, window_min: int) -> FlowStats:
         horizon = now - max(MINUTE, timedelta(minutes=window_min))

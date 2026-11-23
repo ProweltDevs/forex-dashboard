@@ -25,6 +25,12 @@ _SENSITIVE_VALUE = [
     re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),  # JWT
     re.compile(r"\d{5,}:[A-Za-z0-9_-]{30,}"),  # Telegram bot token (also inside a /bot<token>/ URL)
 ]
+# Secret-bearing URL query parameters (httpx logs request URLs; cTrader's OAuth token call sends
+# client_secret and the auth code as GET parameters): keep the name, redact the value.
+_SECRET_QUERY = re.compile(
+    r"(?i)([?&](?:client_secret|code|access_token|refresh_token|token|password|api_key|apikey|key|"
+    r"secret|signature)=)[^&#\s\"']+"
+)
 _MAX_DEPTH = 8
 
 
@@ -35,7 +41,7 @@ def is_sensitive_key(key: str) -> bool:
 def _scrub_str(value: str) -> str:
     for pattern in _SENSITIVE_VALUE:
         value = pattern.sub(REDACTED, value)
-    return value
+    return _SECRET_QUERY.sub(lambda m: m.group(1) + REDACTED, value)
 
 
 def redact(value: object, depth: int = 0) -> object:

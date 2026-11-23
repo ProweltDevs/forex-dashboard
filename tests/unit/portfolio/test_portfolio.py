@@ -164,3 +164,38 @@ def test_unrealized_is_symmetric_between_long_and_short(
     assert lu is not None
     assert su is not None
     assert lu == -su == (mid - entry) * volume * 100_000
+
+
+async def test_stop_applies_fills_still_queued() -> None:
+    """Shutdown regression: a fill published right before ``stop()`` (the consumer never got to run) must
+    still reach the ledger; it reached persistence, and the books and the database must agree."""
+    from trader.domain.events import DomainEvent, FillEvent
+    from trader.domain.time import FixedClock
+    from trader.marketdata.bus import Bus
+    from trader.portfolio.service import PortfolioService
+    from trader.risk.gate import AccountView
+
+    class Oms:
+        def __init__(self) -> None:
+            self.events: Bus[DomainEvent] = Bus()
+
+        def view(self) -> AccountView:
+            return AccountView(
+                account_id="a", account=None, positions=(), open_orders=(), instruments={}, last_ticks={},
+                broker_connected=True,
+            )  # fmt: skip
+
+        def order(self, client_order_id: str) -> None:
+            return None
+
+    class Deals:
+        async def deal_history(self, start: datetime, end: datetime) -> list[Fill]:
+            return []
+
+    oms = Oms()
+    service = PortfolioService("a", oms, Deals(), FixedClock(T0))
+    await service.start()
+    oms.events.publish(FillEvent(account_id="a", fill=fill("F-late"), ts=T0))
+    await service.stop()  # no await in between: the consumer task never saw it
+    assert [e.fill.fill_id for e in service.ledger.entries()] == ["F-late"]
+    assert oms.events.subscribers == ()  # unsubscribed

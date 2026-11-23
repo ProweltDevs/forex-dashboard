@@ -32,6 +32,7 @@ from trader.domain.errors import (
     BrokerUnavailable,
     ConfigError,
     InvalidVolume,
+    LiveTradingNotConfirmed,
     OrderNotFound,
     UnknownOrderState,
     UnknownSymbol,
@@ -207,9 +208,10 @@ async def test_auth_order_and_token_refresh_persisted(server: FakeCTraderServer,
     store = TokenStore(tmp_path / "secrets" / "ct.tokens", key)
     broker = make_broker(server, store=store)
     await broker.connect()
-    assert server.received[:3] == [
+    assert server.received[:4] == [
         "ProtoOAApplicationAuthReq",
         "ProtoOARefreshTokenReq",
+        "ProtoOAGetAccountListByAccessTokenReq",  # live/demo check, with the refreshed token
         "ProtoOAAccountAuthReq",
     ]
     saved = store.load()
@@ -397,6 +399,7 @@ def test_registry_builds_ctrader_from_env(tmp_path: Path) -> None:
 def test_read_env_file(tmp_path: Path) -> None:
     f = tmp_path / ".env"
     f.write_text('# comment\nA=1\nexport B="two words"\nC=3 # trailing\n\nBAD LINE\n')
+    f.chmod(0o600)  # secrets files must be private (others-readable is refused: tests/unit/test_config.py)
     assert read_env_file(f) == {"A": "1", "B": "two words", "C": "3"}
     assert read_env_file(tmp_path / "missing") == {}
 
@@ -451,3 +454,30 @@ async def test_find_order_bisects_truncated_history(
         assert server.rate_limited == 0
     finally:
         await fresh.close()
+
+
+# ------------------------------------------------------------------ live/demo check
+
+
+async def test_refuses_an_account_whose_live_flag_disagrees_with_the_config(
+    server: FakeCTraderServer,
+) -> None:
+    """The broker's own isLive flag decides, not the host: a `host` override can point a demo-labelled
+    config anywhere, but a live account is refused (and a demo one under environment: live)."""
+    live_account = make_broker(server, ctid_trader_account_id=server.ctid + 1)  # the fake's live account
+    with pytest.raises(
+        LiveTradingNotConfirmed, match="is a LIVE account but the config says environment: demo"
+    ):
+        await live_account.connect()
+    assert "ProtoOAAccountAuthReq" not in server.received  # refused before authorising the account
+    demo_as_live = make_broker(server, environment="live")
+    with pytest.raises(
+        LiveTradingNotConfirmed, match="is a demo account but the config says environment: live"
+    ):
+        await demo_as_live.connect()
+    unknown = make_broker(server, ctid_trader_account_id=999)
+    with pytest.raises(AuthExpired, match="not authorised"):
+        await unknown.connect()
+    ok = make_broker(server)
+    await ok.connect()
+    await ok.close()

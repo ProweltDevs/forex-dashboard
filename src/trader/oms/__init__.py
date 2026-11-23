@@ -2,9 +2,10 @@
 
 from .manager import OmsSettings, OrderManager
 from .runtime import AccountRuntime
-from .store import JsonFileStore, MemoryStore, OmsState, OmsStore
+from .store import AccountLocked, JsonFileStore, MemoryStore, OmsState, OmsStore
 
 __all__ = [
+    "AccountLocked",
     "AccountRuntime",
     "JsonFileStore",
     "MemoryStore",

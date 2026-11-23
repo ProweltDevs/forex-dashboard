@@ -106,12 +106,13 @@ async def test_trader_run_paper_synthetic_end_to_end_and_restart(tmp_path: Path)
     assert isinstance(orders, dict)
     assert int(str(orders.get(str(OrderStatus.FILLED), 0))) >= 1, report.lines()
     assert not [e for e in events if e.kind in ("error", "slow_callback")]
-    # Persisted on the way out: strategy state, OMS snapshot (incl. risk), a run report, recorded ticks.
+    # Persisted on the way out: strategy state, OMS snapshot (incl. risk), a run report. Synthetic
+    # random-walk ticks are never recorded: they would pollute the dataset the backtester replays.
     assert json.loads((tmp_path / "strategies" / "ema.json").read_text()).get("above:EURUSD") is not None
     assert (tmp_path / "oms" / "paper-main.json").exists()
     [saved] = list((tmp_path / "reports").glob("run-*.json"))
     assert json.loads(saved.read_text())["strategy_errors"] == 0
-    assert list((tmp_path / "ticks").rglob("*.parquet"))
+    assert not list((tmp_path / "ticks").rglob("*.parquet"))
 
     # Restart: state is restored before on_start.
     again = App(config, env={}, clock=SystemClock())

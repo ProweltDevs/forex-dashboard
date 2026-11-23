@@ -184,6 +184,30 @@ async def test_broker_down_at_startup_exits_and_a_supervisor_restart_recovers(
     assert await trader.terminate() == 0
 
 
+async def test_trader_kill_is_refused_while_trader_run_manages_the_account(
+    trader: Trader, broker: FakeCTraderServer
+) -> None:
+    """Two writers of one account's OMS state would undo each other (the CLI's kill switch overwritten by
+    the running process). The CLI is refused and says what to use instead; the running process is
+    untouched."""
+    await trader.start()
+    await trader.wait_health()
+    code, out = await trader.cli("kill", "--account", ACCOUNT, "--level", "FLATTEN_ALL", "--reason", "chaos")
+    assert code == 2, out
+    assert "another process" in out
+    assert "POST /risk/kill" in out
+    body = await trader.wait_health()
+    assert body["accounts"][ACCOUNT]["kill_level"] == "NONE"
+    assert broker.new_order_requests == []  # the refused CLI never reached the broker
+    assert await trader.terminate() == 0
+    code, out = await trader.cli("kill", "--account", ACCOUNT, "--level", "PAUSE_NEW", "--reason", "chaos")
+    assert code == 0, out  # with the process stopped, the CLI is the way
+    await trader.start()
+    body = await trader.wait_health()
+    assert body["accounts"][ACCOUNT]["kill_level"] == "PAUSE_NEW"  # restored from the CLI's snapshot
+    assert await trader.terminate() == 0
+
+
 class DeadChannel:
     """Telegram (or SMTP) down: every send fails."""
 

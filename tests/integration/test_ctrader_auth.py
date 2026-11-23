@@ -103,6 +103,7 @@ def test_trader_mode_from_env_file_does_not_unlock_live(
 ) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("TRADER_MODE=live\n")
+    env_file.chmod(0o600)
     config = str(ROOT / "config/live.yaml.example")
     assert main(["--env-file", str(env_file), "run", "--config", config, "--confirm-live"], env={}) == 2
     assert "TRADER_MODE=live" in capsys.readouterr().err
@@ -121,3 +122,16 @@ def test_secrets_key_command(tmp_path: Path, capsys: pytest.CaptureFixture[str])
 def test_ctrader_auth_requires_app_credentials(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--env-file", str(tmp_path / ".env"), "ctrader-auth"], env={}) == 2
     assert "CTRADER_DEMO_CLIENT_ID" in capsys.readouterr().err
+
+
+def test_a_dotenv_others_can_read_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRADER_API_TOKEN=x\n")
+    env_file.chmod(0o640)
+    assert (
+        main(
+            ["--env-file", str(env_file), "check-config", "--config", str(ROOT / "config/paper.yaml")], env={}
+        )
+        == 2
+    )
+    assert "run `chmod 600" in capsys.readouterr().err

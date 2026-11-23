@@ -83,7 +83,7 @@ class ExnessSettings:
     account_id: str  # our config id
     exness_account_id: str  # numeric trading account id
     gateway_url: str  # from the DNS widget in Key Management
-    api_key: str
+    api_key: str = field(repr=False)  # sent in a header on every request: keep it out of reprs and logs
     private_key: SecretStr  # 128 hex chars or PKCS#8 PEM
     symbols: tuple[str, ...] = ()  # canonical; empty = every available instrument (one request each)
     symbol_suffix: str = ""  # e.g. "m" if your account's instruments are named "EURUSDm"

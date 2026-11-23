@@ -240,6 +240,52 @@
         "title": "AuditOut",
         "type": "object"
       },
+      "CloseAllIn": {
+        "additionalProperties": false,
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "cancel_pending": {
+            "default": true,
+            "title": "Cancel Pending",
+            "type": "boolean"
+          },
+          "reason": {
+            "default": "manual close all",
+            "title": "Reason",
+            "type": "string"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          },
+          "symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Symbol"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "title": "CloseAllIn",
+        "type": "object"
+      },
       "ClosePositionIn": {
         "additionalProperties": false,
         "properties": {
@@ -506,6 +552,166 @@
           "volume"
         ],
         "title": "ManualOrderIn",
+        "type": "object"
+      },
+      "ModifyOrderIn": {
+        "additionalProperties": false,
+        "description": "Changes to a pending order; omitted fields stay as they are. Risk-checked when it adds risk.",
+        "properties": {
+          "expiry": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry"
+          },
+          "limit_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit Price"
+          },
+          "remove_sl": {
+            "default": false,
+            "title": "Remove Sl",
+            "type": "boolean"
+          },
+          "remove_tp": {
+            "default": false,
+            "title": "Remove Tp",
+            "type": "boolean"
+          },
+          "sl": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sl"
+          },
+          "stop_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Price"
+          },
+          "tp": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tp"
+          },
+          "volume": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume"
+          }
+        },
+        "title": "ModifyOrderIn",
+        "type": "object"
+      },
+      "ModifyPositionIn": {
+        "additionalProperties": false,
+        "description": "New SL/TP for an open position; omitted fields stay as they are. Removing or widening a stop is\nrisk-checked; tightening always goes through.",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "remove_sl": {
+            "default": false,
+            "title": "Remove Sl",
+            "type": "boolean"
+          },
+          "remove_tp": {
+            "default": false,
+            "title": "Remove Tp",
+            "type": "boolean"
+          },
+          "sl": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sl"
+          },
+          "tp": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tp"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "title": "ModifyPositionIn",
         "type": "object"
       },
       "NoteIn": {
@@ -1440,6 +1646,64 @@
         ]
       }
     },
+    "/accounts/{account_id}/flatten": {
+      "post": {
+        "description": "Cancel every pending order and close every position. Does not latch the kill switch (strategies\nmay enter again); `POST /risk/kill` with FLATTEN_ALL does both.",
+        "operationId": "flatten_accounts__account_id__flatten_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Flatten",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
     "/accounts/{account_id}/state": {
       "get": {
         "operationId": "account_state_accounts__account_id__state_get",
@@ -1944,6 +2208,62 @@
         "tags": [
           "trading"
         ]
+      },
+      "patch": {
+        "description": "Change a pending order. A change that adds risk (more volume, a new entry price, a stop removed\nor moved away) goes through the risk checks; a refusal is 409 with `risk:<rule>` in the detail.",
+        "operationId": "modify_order_orders__client_order_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_order_id",
+            "required": true,
+            "schema": {
+              "title": "Client Order Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModifyOrderIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Modify Order",
+        "tags": [
+          "trading"
+        ]
       }
     },
     "/orders/{client_order_id}/cancel": {
@@ -2137,6 +2457,111 @@
           }
         ],
         "summary": "Positions",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
+    "/positions/close-all": {
+      "post": {
+        "description": "Close every position (and cancel pending orders) of an account, a symbol or a strategy.",
+        "operationId": "close_all_positions_close_all_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseAllIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Close All",
+        "tags": [
+          "trading"
+        ]
+      }
+    },
+    "/positions/{position_id}": {
+      "patch": {
+        "description": "New SL/TP. Removing or widening a stop is risk-checked (409 when refused, e.g. under a kill\nswitch); tightening always goes through.",
+        "operationId": "modify_position_positions__position_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "position_id",
+            "required": true,
+            "schema": {
+              "title": "Position Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModifyPositionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Modify Position",
         "tags": [
           "trading"
         ]

@@ -26,11 +26,20 @@ def load_secrets(ref: str, env: Mapping[str, str], required: tuple[str, ...] = (
     return found
 
 
+def require_private(path: Path) -> None:
+    """Secrets files must be readable by their owner only (SPEC §15: "a secrets file with 600
+    permissions"). Group or other access is refused, with the fix in the message."""
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        raise ConfigError(f"{path} holds secrets but is mode {mode:04o}: run `chmod 600 {path}`")
+
+
 def read_env_file(path: Path) -> dict[str, str]:
     """Parse a ``.env`` file (KEY=VALUE lines, ``#`` comments, optional quotes). Missing file -> {}.
-    Never logs values."""
+    The file must be 0600 (``require_private``). Never logs values."""
     if not path.exists():
         return {}
+    require_private(path)
     result: dict[str, str] = {}
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()

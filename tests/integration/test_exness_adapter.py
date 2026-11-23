@@ -393,7 +393,20 @@ def test_registry_builds_exness(tmp_path: Path) -> None:
         default_registry().create(account, BrokerDeps(clock=SystemClock(), env={"EX_DEMO_API_KEY": "k"}))
     key_file = tmp_path / "private.pem"
     key_file.write_text(KEY_HEX)
-    env = {"EX_DEMO_API_KEY": "k", "EX_DEMO_PRIVATE_KEY_FILE": str(key_file)}
+    key_file.chmod(0o644)
+    env = {
+        "EX_DEMO_API_KEY": "k",
+        "EX_DEMO_PRIVATE_KEY_FILE": str(key_file),
+        "EX_DEMO_CONFIRM_DEMO_ACCOUNT": "yes",
+    }
+    with pytest.raises(ConfigError, match="mode 0644: run `chmod 600"):
+        default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))  # others can read it
+    key_file.chmod(0o600)
+    del env["EX_DEMO_CONFIRM_DEMO_ACCOUNT"]
+    # A demo-labelled Exness account needs the explicit confirmation (one host for demo and real).
+    with pytest.raises(ConfigError, match="EX_DEMO_CONFIRM_DEMO_ACCOUNT=yes"):
+        default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env))
+    env["EX_DEMO_CONFIRM_DEMO_ACCOUNT"] = "yes"
     assert isinstance(
         default_registry().create(account, BrokerDeps(clock=SystemClock(), env=env)), ExnessBroker
     )

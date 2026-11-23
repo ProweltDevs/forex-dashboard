@@ -126,6 +126,23 @@ def create_api(
         """Close a position (or ``volume`` lots of it). Risk-reducing: allowed under any kill-switch level."""
         return await control.close_position(position_id, body)
 
+    @api.patch("/positions/{position_id}", tags=["trading"], dependencies=authed)
+    async def modify_position(position_id: str, body: s.ModifyPositionIn) -> s.PositionOut:
+        """New SL/TP. Removing or widening a stop is risk-checked (409 when refused, e.g. under a kill
+        switch); tightening always goes through."""
+        return await control.modify_position(position_id, body)
+
+    @api.post("/positions/close-all", tags=["trading"], dependencies=authed)
+    async def close_all(body: s.CloseAllIn) -> s.CommandOut:
+        """Close every position (and cancel pending orders) of an account, a symbol or a strategy."""
+        return await control.close_all(body)
+
+    @api.post("/accounts/{account_id}/flatten", tags=["trading"], dependencies=authed)
+    async def flatten(account_id: str, body: s.ReasonIn) -> s.CommandOut:
+        """Cancel every pending order and close every position. Does not latch the kill switch (strategies
+        may enter again); `POST /risk/kill` with FLATTEN_ALL does both."""
+        return await control.flatten(account_id, body.reason)
+
     @api.get("/orders", tags=["trading"], dependencies=authed)
     def orders(
         account: str | None = None,
@@ -145,6 +162,12 @@ def create_api(
         """Manual order (``strategy_id="manual"``) through the RiskEngine and the OMS. A risk rejection is
         returned as an order with status ``REJECTED`` and its ``rejection_reason``."""
         return await control.submit_order(body)
+
+    @api.patch("/orders/{client_order_id}", tags=["trading"], dependencies=authed)
+    async def modify_order(client_order_id: str, body: s.ModifyOrderIn) -> s.OrderOut:
+        """Change a pending order. A change that adds risk (more volume, a new entry price, a stop removed
+        or moved away) goes through the risk checks; a refusal is 409 with `risk:<rule>` in the detail."""
+        return await control.modify_order(client_order_id, body)
 
     @api.post("/orders/{client_order_id}/cancel", tags=["trading"], dependencies=authed)
     async def cancel_order(client_order_id: str, body: s.ReasonIn) -> s.CommandOut:

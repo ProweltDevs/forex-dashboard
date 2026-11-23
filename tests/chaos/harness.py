@@ -113,6 +113,18 @@ class Trader:
         )  # fmt: skip
         self.starts += 1
 
+    async def cli(self, *args: str) -> tuple[int, str]:
+        """Run another ``trader`` command against the same config and data directory."""
+        config, env_file = self.write_files()
+        env = {k: v for k, v in os.environ.items() if not k.startswith(SECRET_PREFIXES)}
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "trader.cli", "--env-file", str(env_file), args[0], "--config", str(config),
+            *args[1:], cwd=self.workdir, env=env, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )  # fmt: skip
+        out, _ = await proc.communicate()
+        return int(proc.returncode or 0), out.decode(errors="replace")
+
     def log(self) -> str:
         return self.log_path.read_text(encoding="utf-8", errors="replace")
 

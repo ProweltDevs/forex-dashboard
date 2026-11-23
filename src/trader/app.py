@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from trader import __version__
 from trader.analytics.books import AccountBooks, build_books, load_offline, params_hash
+from trader.analytics.execution import ExecutionStats, percentile
 from trader.analytics.journal import TradeRecord
 from trader.analytics.statement import StatementCheck, compare, day_window
 from trader.api.control import Control
@@ -365,6 +366,7 @@ class App:
                 notes.attach(db.writer.events, "db")
         if db is not None:
             db.attach(self.ops_events, None, name="persistence-ops")
+            db.attach(self.market.feeds, None, name="persistence-feeds")  # stale/live: domain events too
         self._attach_metrics()
         await self.monitor.start()
         await self.runner.run()
@@ -486,7 +488,10 @@ class App:
         cfg = acc.paper.synthetic_feed
         if cfg is None:
             raise ConfigError(f"paper account {acc.id} needs paper.market_data_from or paper.synthetic_feed")
-        _log.warning("synthetic_feed", account=acc.id, detail="random-walk prices: not market data")
+        _log.warning(
+            "synthetic_feed", account=acc.id, detail="random-walk prices: not market data, not recorded"
+        )
+        self.market.exclude_from_recording(acc.id)
         feed = SyntheticFeed(
             acc.symbols,
             self._clock,
@@ -516,11 +521,11 @@ class App:
             self._reporter.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._reporter
+        for services in self.accounts.values():
+            await services.runtime.stop()  # first: the books then see every fill up to the disconnect
         for aid, books in self.books.items():
             await books.portfolio.stop()
             await books.write_report(self.config.data_dir, self._report_day[aid])  # today so far
-        for services in self.accounts.values():
-            await services.runtime.stop()
         for feed in self.feeds.values():
             await feed.close()
         await self.market.stop()
@@ -664,6 +669,22 @@ def daily_lines(books: AccountBooks, day: date) -> list[str]:
     point = p.snapshot()
     if point is not None:
         lines.append(f"equity {point.equity:.2f}, drawdown {point.drawdown:.2f} ({point.drawdown_pct:.2f}%)")
+    risk = p.risk_counts.get(day, {})
+    if risk:
+        lines.append("risk events: " + ", ".join(f"{k} {v}" for k, v in sorted(risk.items())))
+    st = ExecutionStats()
+    for r in books.executions.records:
+        if (ts := r.send_ts or r.signal_ts) is not None and p.ledger_day(ts) == day:
+            st.add(r)
+    if st.orders:
+        slip = sum(st.slippage_points) / len(st.slippage_points) if st.slippage_points else None
+        ack = percentile(st.latencies["send_to_ack"], 95)
+        lines.append(
+            f"execution: {st.orders} orders, filled {st.filled}, rejected {st.rejected}, "
+            f"requoted {st.requoted}"
+            + ("" if slip is None else f", slippage {slip:+.1f} pts avg")
+            + ("" if ack is None else f", ack p95 {ack:.0f} ms")
+        )
     return lines
 
 
