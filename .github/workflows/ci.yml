@@ -8,9 +8,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
+          version: "0.11.32"  # the same uv as the Dockerfile
           enable-cache: true
       - name: Install
         run: uv sync --locked
@@ -24,6 +25,6 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build the image and smoke-test the compose stack (ready, graceful SIGTERM exit)
         run: scripts/docker_smoke.sh
