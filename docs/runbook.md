@@ -39,7 +39,7 @@ reconciles with the broker before strategies run. That is why restarting the pro
 4. **Code and secrets:**
    ```bash
    git clone <repo> trader && cd trader
-   cp .env.example .env && chmod 600 .env    # fill in the broker, API and Telegram secrets
+   cp .env.example .env && chmod 600 .env    # fill in the broker, API and Telegram secrets (0600 is enforced)
    ```
    Change the database password in `docker-compose.yml` (both places).
 5. **Config.** Start from `config/docker.yaml` (paper, synthetic prices). For a demo account, copy it to
@@ -156,7 +156,10 @@ status, and the clock offset per feed.
 | `trader_event_loop_lag_seconds` | above 0.1 s: something blocks the loop |
 | `trader_db_up`, `trader_db_pending_records` | the database is down, or the WAL is growing |
 | `trader_strategy_status`, `trader_strategy_events_total{kind=error}` | |
-| `trader_notifications_failed` | alerts are not reaching you |
+| `trader_notifications_failed`, `trader_notifications_sent` | alerts are not reaching you |
+| `trader_order_status_changes_total{status}`, `trader_fills_total`, `trader_fill_volume_lots_total` | activity (rates) |
+| `trader_alerts_total{kind,severity}` | every operator alert, e.g. `slippage_exceeded`, `clock_drift`, `db_down` |
+| `trader_build_info{version,mode}`, `trader_start_time_seconds` | which build runs, and restarts |
 
 Example Prometheus alert rules:
 
@@ -197,6 +200,7 @@ Telegram and email messages start with the mode, e.g. `[live] CRITICAL: Kill swi
 | SL hit / TP hit / position closed | an exit | nothing; the daily report sums them up |
 | **db down** (critical) | PostgreSQL unreachable; records buffer to `data/wal/db.wal` | Bring PostgreSQL back (`docker compose ps postgres`, its logs, disk space). The WAL replays by itself; `db recovered` follows |
 | **wal write failed** (critical) | the WAL cannot be written (disk full); records are held in memory | Free disk space now (`df -h`; old `ticks/` Parquet files are the usual candidates) |
+| **slippage exceeded** (warning) | a STOP_LIMIT filled beyond its limit, or a MARKET order with `max_slippage` beyond that from its signal price (Exness cannot cap slippage on market-execution instruments) | Check the fill (`/orders/{id}`); repeated ones on one instrument: widen the strategy's limits or avoid that order type there |
 | **equity drift** / balance mismatch | computed vs broker equity or balance differ | A deposit, withdrawal or fee explains a balance mismatch. Otherwise run `pnl-check` (section 7) |
 | **clock drift** | this host's clock is off from the broker's | `chronyc tracking`, `timedatectl`; fix NTP. The offset includes network latency |
 | Stale feed | no ticks for a symbol while its session is open | Broker-side quote issue or a lost subscription. The stale breaker may pause entries; it clears when ticks return |
@@ -212,12 +216,15 @@ Telegram and email messages start with the mode, e.g. `[live] CRITICAL: Kill swi
 |---|---|
 | Process running, API on | `curl -X POST -H "Authorization: Bearer $TRADER_API_TOKEN" -H 'content-type: application/json' 127.0.0.1:8700/risk/kill -d '{"account":"*","level":"FLATTEN_ALL","reason":"..."}'` |
 | Process running, phone | Telegram `/kill flatten` (or `/kill` to only block new entries) |
-| Process **not** running | `docker compose run --rm app kill --config <file> --account <id> --level FLATTEN_ALL --reason "..."` (live: `--confirm-live`, `TRADER_MODE=live`). It stores the level, so the next start honours it |
+| Process **not** running | `docker compose run --rm app kill --config <file> --account <id> --level FLATTEN_ALL --reason "..."`. Live: `docker compose -f docker-compose.yml -f docker-compose.live.yml run --rm app kill ... --confirm-live` (the override sets `TRADER_MODE=live`). It stores the level, so the next start honours it |
 | Reset | `POST /risk/reset` with `{"account": "<id>", "reason": "..."}`, or `trader kill --reset` with the process stopped. Never from Telegram |
 
 Levels: `PAUSE_NEW` blocks entries; `CANCEL_PENDING` also cancels pending orders; `FLATTEN_ALL` also
-closes every position. Never run `trader kill` while the process manages the same account: both would
-write the OMS snapshot.
+closes every position. `trader kill` while `trader run` manages the same account is refused (the OMS
+state file is locked by its owner): use the API or Telegram then.
+
+`POST /accounts/{id}/flatten` closes everything **without** latching the kill switch, and
+`POST /positions/close-all` does it for one symbol or strategy (docs/api/README.md).
 
 ### After a crash or a hard kill
 1. Start the process (Docker does it by itself).

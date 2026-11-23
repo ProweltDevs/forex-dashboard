@@ -392,6 +392,7 @@ The bot can optionally accept `/status`, `/pnl`, `/pause`, `/kill` commands (res
 | 9 | Persistence hardening: event store, async writer, DB-outage buffer | DB kill test: trading continues, data replayed |
 | 10 | Control API + WebSocket stream + Telegram notifications | API contract tests; alerts fire |
 | 11 | Ops hardening: Docker, metrics, health, graceful shutdown, chaos tests (drop connection, kill process mid-order) | Chaos suite green; runbook in `docs/runbook.md` |
+| 12 | Setup audit: fresh clone, configs, CI, Docker; the code against CLAUDE.md and this spec; fix what is wrong | Audit report in `docs/audit/`; every finding fixed and tested, or listed as open with a reason |
 
 Later: chart UI (reads the Control API), backtester (replays recorded Parquet ticks through the PaperBroker/simulator
 with the same strategy code), MT5 bridge adapter, cTrader FIX adapter, more brokers.

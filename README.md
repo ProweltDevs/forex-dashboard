@@ -6,6 +6,7 @@ risk management and P&L analysis. Brokers are plug-and-play adapters (Exness Tra
 - Rules for every change: [`CLAUDE.md`](CLAUDE.md)
 - Scope, behaviour and build order: [`docs/SPEC.md`](docs/SPEC.md)
 - Design decisions: [`docs/adr/`](docs/adr/)
+- Setup audit (what was checked, fixed and is still open): [`docs/audit/2026-11-setup-audit.md`](docs/audit/2026-11-setup-audit.md)
 
 ## Quick start
 
@@ -45,7 +46,8 @@ for a demo account only), then `uv run pytest -m demo`.
 ## Market data
 
 Ticks feed a non-blocking bus, bar builder and stale-feed monitor, and are recorded to
-`data/ticks/{broker}/{symbol}/{yyyy-mm-dd}.parquet` (the future backtest dataset). See
+`data/ticks/{feed}/{symbol}/{yyyy-mm-dd}.parquet`, keyed by the account that received them (the future
+backtest dataset; synthetic prices are never recorded). See
 [ADR 0006](docs/adr/0006-market-data.md). `uv run pytest -m demo tests/contract/test_bars_vs_broker.py -s`
 compares bars built from live ticks with the broker's candles.
 
@@ -161,7 +163,13 @@ Set the URL in `.env`:
 TRADER_DB_URL=postgresql+asyncpg://trader:change-me@localhost:5432/trader
 ```
 
-`trader run` migrates the schema on its first connection; you can also run `uv run alembic upgrade head`.
+`trader run` migrates the schema on its first connection. Alembic reads the URL from the real
+environment only (not from `.env`), so to run it by hand:
+
+```bash
+TRADER_DB_URL=postgresql+asyncpg://trader:change-me@localhost:5432/trader uv run alembic upgrade head
+```
+
 If the database goes down, trading continues and records are buffered to `data/wal/db.wal`. They are
 replayed when the database is back, and the outage is reported as `db_down` / `db_recovered` alerts.
 

@@ -32,7 +32,7 @@ query string or headers.
 |---|---|
 | 401 | missing or wrong token |
 | 404 | unknown account, order, position, strategy or trade |
-| 409 | not possible in the current state (resume under a kill switch, pause a strategy that is not running) |
+| 409 | not possible in the current state (resume under a kill switch, pause a strategy that is not running), or a change the RiskEngine refused (`risk:<rule>: ...`) |
 | 422 | invalid input (body, query, params a strategy rejects, an order the domain refuses) |
 | 502 / 503 | broker error / broker unavailable |
 
@@ -48,9 +48,13 @@ query string or headers.
 | GET | `/accounts/{id}/state` | balance, equity (broker and computed), margin, P&L today, drawdown, risk triggers |
 | GET | `/positions?account=&symbol=` | open positions with unrealized P&L |
 | POST | `/positions/{id}/close` | close (or `volume` lots of) a position; allowed at any kill level |
+| PATCH | `/positions/{id}` | new SL/TP (`sl`, `tp`, `remove_sl`, `remove_tp`); removing or widening a stop is risk-checked, tightening always passes |
+| POST | `/positions/close-all` | close every position of an account, or of one `symbol` / `strategy` (and cancel matching pending orders) |
+| POST | `/accounts/{id}/flatten` | cancel every pending order and close every position, without latching the kill switch |
 | GET | `/orders?account=&open=&strategy=&limit=` | orders, newest first |
 | GET | `/orders/{client_order_id}` | one order |
 | POST | `/orders` | **manual order**, see below |
+| PATCH | `/orders/{client_order_id}` | change a pending order (volume, prices, SL/TP, expiry); a change that adds risk is risk-checked |
 | POST | `/orders/{client_order_id}/cancel` | cancel a pending order |
 | GET / POST | `/strategies` | list / load a strategy instance |
 | GET | `/strategies/{id}` | one strategy: status, params, stats |
