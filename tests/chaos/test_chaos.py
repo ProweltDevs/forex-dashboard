@@ -41,10 +41,21 @@ async def wait_resolved(t: Trader, cids: set[str], timeout: float = 45.0) -> dic
             await asyncio.sleep(0.2)
 
 
-async def positions_agree(t: Trader, broker: FakeCTraderServer) -> None:
+async def positions_agree(t: Trader, broker: FakeCTraderServer, timeout: float = 10.0) -> None:
+    """The trader's positions equal the broker's once the events in flight are processed (an order's ACK
+    reaches the API before its fill event reaches the OMS): wait for that, then insist."""
+    theirs: set[str] = set()
+    ours: set[str] = set()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     async with t.api() as api:
-        ours = {p["position_id"] for p in (await api.get("/positions")).json()}
-    assert ours == {str(pid) for pid in broker.positions}
+        while True:
+            ours = {p["position_id"] for p in (await api.get("/positions")).json()}
+            theirs = {str(pid) for pid in broker.positions}
+            if ours == theirs or loop.time() > deadline:
+                break
+            await asyncio.sleep(0.1)
+    assert ours == theirs, f"only at the broker: {theirs - ours}; only in the trader: {ours - theirs}"
 
 
 async def test_sigterm_with_an_order_in_flight_is_graceful(trader: Trader, broker: FakeCTraderServer) -> None:
@@ -126,6 +137,7 @@ async def test_connection_dropped_with_an_order_in_flight(trader: Trader, broker
         assert len(broker.new_order_requests) == 2  # the in-flight order was found, not resent
         third = (await api.post("/orders", json=order_body())).json()  # trading resumed
         assert third["status"] in ("ACCEPTED", "FILLED")
+    await wait_resolved(trader, {third["client_order_id"]})  # the API answers at the ACK; the fill follows
     await positions_agree(trader, broker)
     text = await trader.metrics()
     assert f'trader_broker_disconnects_total{{account="{ACCOUNT}"}} 1.0' in text
@@ -177,7 +189,7 @@ async def test_broker_down_at_startup_exits_and_a_supervisor_restart_recovers(
     await broker.come_back()
     await trader.start()  # what the supervisor does
     await trader.wait_health()
-    orders = await manual_orders(trader)
+    orders = await wait_resolved(trader, {filled["client_order_id"]})
     assert orders[filled["client_order_id"]]["status"] == "FILLED"
     await positions_agree(trader, broker)
     assert executed(broker) == {filled["client_order_id"]: 1}
