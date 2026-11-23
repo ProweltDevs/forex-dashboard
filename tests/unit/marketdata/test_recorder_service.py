@@ -253,3 +253,20 @@ def test_config_defaults_and_offset_semantics() -> None:
     ts = datetime(2026, 1, 7, 23, 30, tzinfo=UTC)  # Wednesday
     assert bar_start(ts, Timeframe.D1, ny) == datetime(2026, 1, 7, 22, tzinfo=UTC)
     assert bar_start(ts, Timeframe.W1, ny) == datetime(2026, 1, 4, 22, tzinfo=UTC)  # Sunday 22:00 forex open
+
+
+async def test_synthetic_feeds_are_never_recorded(tmp_path: Path) -> None:
+    from trader.config.settings import MarketDataConfig
+    from trader.marketdata.service import MarketDataService
+
+    service = MarketDataService(MarketDataConfig(), FixedClock(T0), tmp_path)
+    service.exclude_from_recording("synthetic")
+    await service.start()
+    service.on_tick("synthetic", tick(T0, "1.1", "1.2"))
+    service.on_tick("real", tick(T0, "1.1", "1.2"))
+    await asyncio.sleep(0.05)
+    await service.stop()
+    assert service.recorder is not None
+    assert service.recorder.recorded == 1
+    assert (tmp_path / "ticks" / "real").exists()
+    assert not (tmp_path / "ticks" / "synthetic").exists()

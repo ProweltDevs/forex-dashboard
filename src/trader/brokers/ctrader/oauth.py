@@ -23,7 +23,7 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import SecretStr
 
-from trader.domain.errors import AuthExpired, ConfigError
+from trader.domain.errors import AuthExpired, BrokerUnavailable, ConfigError
 from trader.domain.time import ensure_utc, from_epoch_ms, to_epoch_ms
 
 TOKEN_URL = "https://openapi.ctrader.com/apps/token"
@@ -58,19 +58,27 @@ async def _token_call(params: dict[str, str], now: datetime, client: httpx.Async
     http = client or httpx.AsyncClient(timeout=20)
     try:
         resp = await http.get(TOKEN_URL, params=params, headers={"Accept": "application/json"})
+    except httpx.HTTPError as exc:
+        # Never the exception text: it holds the request URL, and the URL holds client_secret.
+        raise BrokerUnavailable(f"cTrader token endpoint unreachable ({type(exc).__name__})") from None
     finally:
         if owns:
             await http.aclose()
     try:
         data = resp.json()
-    except ValueError as exc:
-        raise AuthExpired(f"token endpoint returned HTTP {resp.status_code} (not JSON)") from exc
+    except ValueError:
+        raise AuthExpired(f"token endpoint returned HTTP {resp.status_code} (not JSON)") from None
+    if not isinstance(data, dict):
+        raise AuthExpired(f"token endpoint returned HTTP {resp.status_code} (not a JSON object)")
     if resp.status_code != 200 or data.get("errorCode"):
         # The description never contains the secret; still, keep only code + description.
         raise AuthExpired(
             f"token request failed: {data.get('errorCode')} {data.get('description') or ''}".strip()
         )
-    return TokenSet.from_response(data["accessToken"], data["refreshToken"], int(data["expiresIn"]), now)
+    try:
+        return TokenSet.from_response(data["accessToken"], data["refreshToken"], int(data["expiresIn"]), now)
+    except (KeyError, TypeError, ValueError):
+        raise AuthExpired("token endpoint response lacks accessToken/refreshToken/expiresIn") from None
 
 
 async def exchange_code(

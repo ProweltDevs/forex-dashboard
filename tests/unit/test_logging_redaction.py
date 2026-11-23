@@ -65,3 +65,17 @@ def test_configured_logger_output_is_redacted(capsys: pytest.CaptureFixture[str]
     first = json.loads(err.splitlines()[0])
     assert first["api_key"] == REDACTED
     assert first["symbol"] == "EURUSD"
+
+
+def test_secret_query_parameters_are_redacted_in_any_handler(caplog: pytest.LogCaptureFixture) -> None:
+    """httpx logs request URLs; cTrader's OAuth token call sends client_secret and the code as GET params."""
+    import logging
+
+    url = "https://openapi.ctrader.com/apps/token?grant_type=authorization_code&code=abc123&client_id=42&client_secret=s3cr3t"
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        logging.getLogger("httpx").info("HTTP Request: GET %s", url)
+    message = caplog.records[0].getMessage()
+    assert "s3cr3t" not in message
+    assert "abc123" not in message
+    assert "client_secret=***REDACTED***" in message
+    assert "client_id=42" in message  # not a secret: kept

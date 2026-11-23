@@ -139,6 +139,8 @@ async def _scenario(run: Running, tg: FakeTelegram) -> None:
     lines = daily_lines(books, books.portfolio.ledger_day(run.app.clock.now()))
     assert lines[0].startswith("realized ")
     assert any("manual EURUSD" in line for line in lines)
+    assert any(line.startswith("risk events: ") and "rejected:loss_per_trade" in line for line in lines)
+    assert any(line.startswith("execution: ") and " orders, filled " in line for line in lines)
 
     notifier = run.app.notifications
     assert notifier is not None

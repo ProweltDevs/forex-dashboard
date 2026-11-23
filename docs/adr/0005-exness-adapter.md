@@ -27,7 +27,8 @@ surface is small and the domain mapping is the real work. `docs/brokers/exness.m
   stream, which (like every reconnect) gates trade events until the OMS takes a snapshot.
 - **Attribution.** Entities echo neither the comment nor the client id, so the adapter keeps
   `client_order_id → order_id` and `position_id → strategy_id` in memory. After a restart, positions not
-  re-attributed by the OMS show as `manual` until the persistence layer (phase 9) stores the mapping.
+  re-attributed by the OMS show as `manual`; the OMS snapshot keeps the position → strategy mapping, so
+  this only affects positions it never saw (opened elsewhere).
   The comment `strategy|version` (≤ 31 chars) is still sent for visibility in Exness's own UI.
 - **SL/TP.** Market and pending orders send `stop_loss_price`/`take_profit_price` directly. For an open position,
   `modify_position` creates (`POST type=sltp`), changes (`PATCH`), or removes (`DELETE`) the linked `sltp` order.
@@ -35,7 +36,9 @@ surface is small and the domain mapping is the real work. `docs/brokers/exness.m
 - **Capabilities.** MARKET, LIMIT, STOP; no STOP_LIMIT; no server-side expiry (GTD/DAY are rejected so the OMS
   emulates them); pending modify = price/SL/TP (volume changes are rejected); partial close yes; close-by not
   exposed yet; hedging per config (default true). `max_slippage` maps to `price` + `deviation` only on
-  `exec_mode = instant` instruments; on `market` execution it is up to the OMS to check slippage after the fill.
+  `exec_mode = instant` instruments. On `market` execution the cap cannot be sent: the OMS checks every fill
+  and raises a `slippage_exceeded` alert when a MARKET order with `max_slippage`, or a STOP_LIMIT (emulated
+  here: its triggered leg may go as MARKET), filled beyond its price limit (phase 12).
 - **Rate limits.** Exact sliding windows (`SlidingWindow`), account-wide plus per operation, loaded from
   `/limits` at every (re)connect, with a 5/s bootstrap until then. Candle requests are chunked by the
   published `max_candles_per_request`.

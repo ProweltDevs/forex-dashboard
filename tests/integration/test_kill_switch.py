@@ -21,6 +21,8 @@ from trader.domain.time import SystemClock
 from trader.oms import JsonFileStore
 
 D = Decimal
+# Never the developer's real ./.env: tests must not see real credentials.
+NO_DOTENV = ["--env-file", "/nonexistent/trader-tests.env"]
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -142,7 +144,11 @@ def test_cli_kill_refuses_unknown_and_paper_accounts(capsys: pytest.CaptureFixtu
     )
     assert "unknown account" in capsys.readouterr().err
     assert (
-        main(["kill", "--config", paper, "--account", "paper-main", "--reset", "--reason", "x"], env={}) == 2
+        main(
+            [*NO_DOTENV, "kill", "--config", paper, "--account", "paper-main", "--reset", "--reason", "x"],
+            env={},
+        )
+        == 2
     )
     assert "kill failed" in capsys.readouterr().err
 

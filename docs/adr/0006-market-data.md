@@ -51,11 +51,17 @@ A feed is STALE when it has been silent longer than `clamp(multiplier × EWMA(in
 per symbol: busy pairs get `min`, quiet CFDs a longer threshold, and before warm-up it is `max`. Gaps longer
 than `max` (weekends, for example) are not learned. The monitor uses the local receive time, so broker clock
 drift doesn't matter, and all arithmetic is integer ms. It emits a new domain event, `FeedEvent`
-(STALE/LIVE), which risk will use as a circuit-breaker trigger (SPEC §7).
+(STALE/LIVE) for notifications, metrics, `/health` and the event store. The risk engine's stale-feed
+breaker uses its own tick clock (`risk/market.py` `FeedClock`, ADR 0008), so risk does not depend on this
+monitor's adaptive thresholds.
 
 ## Tick recorder (`recorder.py`)
 
-- Layout as in SPEC §11: `data/ticks/{broker}/{symbol}/{yyyy-mm-dd}.parquet`, split by the UTC day of `ts`.
+- Layout: `data/ticks/{feed}/{symbol}/{yyyy-mm-dd}.parquet`, split by the UTC day of `ts`. The feed key is
+  the account id that received the ticks (SPEC §11 says `{broker}`; one broker can have several accounts with
+  different prices). A paper account priced by `market_data_from` records under its own id.
+- **Synthetic prices are never recorded** (phase 12): the random-walk feed would otherwise pollute the
+  dataset the backtester will replay as market data.
 - **Crash safety (refines the SPEC):** a Parquet file is only valid once its footer is written, so one open
   file per day would lose the whole day on a crash. Each flush writes a complete part file
   (`{day}.part-{ulid}.parquet`, written to a temp name then renamed). Closed days are compacted into

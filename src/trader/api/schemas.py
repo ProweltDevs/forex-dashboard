@@ -108,6 +108,41 @@ class ClosePositionIn(BaseModel):
     reason: str = "manual close"
 
 
+class ModifyOrderIn(BaseModel):
+    """Changes to a pending order; omitted fields stay as they are. Risk-checked when it adds risk."""
+
+    model_config = ConfigDict(extra="forbid")
+    volume: Decimal | None = Field(default=None, gt=0)
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    stop_price: Decimal | None = Field(default=None, gt=0)
+    sl: Decimal | None = Field(default=None, gt=0)
+    tp: Decimal | None = Field(default=None, gt=0)
+    remove_sl: bool = False
+    remove_tp: bool = False
+    expiry: datetime | None = None
+
+
+class ModifyPositionIn(BaseModel):
+    """New SL/TP for an open position; omitted fields stay as they are. Removing or widening a stop is
+    risk-checked; tightening always goes through."""
+
+    model_config = ConfigDict(extra="forbid")
+    account: str
+    sl: Decimal | None = Field(default=None, gt=0)
+    tp: Decimal | None = Field(default=None, gt=0)
+    remove_sl: bool = False
+    remove_tp: bool = False
+
+
+class CloseAllIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account: str
+    symbol: str | None = None
+    strategy: str | None = None
+    cancel_pending: bool = True  # also cancel matching pending orders
+    reason: str = "manual close all"
+
+
 class CommandOut(_Out):
     ok: bool
     message: str

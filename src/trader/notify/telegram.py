@@ -105,7 +105,8 @@ HELP = (
     "/pnl - today's P&L per account\n"
     "/pause [strategy|all] - pause strategies (default all)\n"
     "/kill [pause|cancel|flatten] [account|all] - kill switch (default: pause new entries, all accounts)\n"
-    "Reset the kill switch with the API or `trader kill --reset`."
+    "Reset the kill switch with the API (POST /risk/reset),\n"
+    "or `trader kill --reset` once the process is stopped."
 )
 _LEVELS = {
     "pause": KillLevel.PAUSE_NEW,

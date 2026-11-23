@@ -17,8 +17,10 @@ from typing import TYPE_CHECKING, Any
 from trader.analytics import execution, metrics
 from trader.analytics.execution import ExecutionRecord
 from trader.analytics.journal import TradeRecord
+from trader.brokers.base import OrderChanges
 from trader.config.settings import StrategyConfig
 from trader.domain.enums import KillLevel, OrderStatus
+from trader.domain.errors import OrderRejected
 from trader.domain.models import Order, OrderIntent, Position
 from trader.persistence.audit import AuditEntry
 from trader.strategy.base import StrategyStatus
@@ -471,6 +473,75 @@ class Control:
         what = "close" if body.volume is None else f"close {body.volume} lots"
         return s.CommandOut(ok=True, message=f"{what} requested for {position_id}")
 
+    async def modify_order(self, client_order_id: str, body: s.ModifyOrderIn) -> s.OrderOut:
+        for aid, a in self.app.accounts.items():
+            if a.oms.order(client_order_id) is None:
+                continue
+            if (body.remove_sl and body.sl is not None) or (body.remove_tp and body.tp is not None):
+                raise ValueError("set either sl or remove_sl (tp or remove_tp), not both")
+            changes = OrderChanges(**body.model_dump())
+            if changes.is_empty:
+                raise ValueError("no changes given")
+
+            async def run(a: AccountServices = a, changes: OrderChanges = changes) -> None:
+                await a.oms.modify_order(client_order_id, changes)
+
+            details = {
+                "client_order_id": client_order_id,
+                **body.model_dump(mode="json", exclude_defaults=True),
+            }
+            await _risk_refusal_is_conflict(self._audited("order_modify", aid, details, run))
+            return self.order(client_order_id)
+        raise NotFound(f"unknown order {client_order_id!r}")
+
+    async def modify_position(self, position_id: str, body: s.ModifyPositionIn) -> s.PositionOut:
+        services = self._account(body.account)
+        pos = next((p for p in services.oms.positions() if p.position_id == position_id), None)
+        if pos is None:
+            raise NotFound(f"unknown position {position_id!r} on {body.account}")
+        if (body.remove_sl and body.sl is not None) or (body.remove_tp and body.tp is not None):
+            raise ValueError("set either sl or remove_sl (tp or remove_tp), not both")
+        sl = None if body.remove_sl else (body.sl if body.sl is not None else pos.sl)
+        tp = None if body.remove_tp else (body.tp if body.tp is not None else pos.tp)
+        if (sl, tp) == (pos.sl, pos.tp):
+            raise ValueError("no changes given")
+
+        async def run() -> None:
+            await services.oms.modify_position(position_id, sl, tp)
+
+        details = {"position_id": position_id, "sl": sl, "tp": tp, "before": {"sl": pos.sl, "tp": pos.tp}}
+        await _risk_refusal_is_conflict(self._audited("position_modify", body.account, details, run))
+        current = next((p for p in services.oms.positions() if p.position_id == position_id), pos)
+        return self._position_out(body.account, current)
+
+    async def close_all(self, body: s.CloseAllIn) -> s.CommandOut:
+        """Close matching positions (and cancel matching pending orders) without touching the kill switch.
+        Risk-reducing: allowed at any kill level."""
+        services = self._account(body.account)
+
+        async def run() -> int:
+            return await services.oms.close_all(
+                symbol=body.symbol, strategy_id=body.strategy, cancel_pending=body.cancel_pending
+            )
+
+        sent = await self._audited(
+            "close_all", body.account, body.model_dump(mode="json"), run, lambda n: f"{n} requests sent"
+        )
+        return s.CommandOut(ok=True, message=f"{sent} close/cancel requests sent")
+
+    async def flatten(self, account_id: str, reason: str) -> s.CommandOut:
+        """Cancel every pending order and close every position, without latching the kill switch (use
+        ``POST /risk/kill`` FLATTEN_ALL to also block new entries)."""
+        services = self._account(account_id)
+
+        async def run() -> int:
+            return await services.oms.flatten()
+
+        sent = await self._audited(
+            "flatten", account_id, {"reason": reason}, run, lambda n: f"{n} requests sent"
+        )
+        return s.CommandOut(ok=True, message=f"{sent} close/cancel requests sent")
+
     async def kill(self, account_id: str, level: KillLevel, reason: str) -> s.RiskAccountOut:
         services = self._account(account_id)
         if level is KillLevel.NONE:
@@ -589,6 +660,16 @@ class Control:
 
         await self._audited("trade_note", account_id, {"trade_id": trade_id, "text": text}, run)
         return s.CommandOut(ok=True, message="note added")
+
+
+async def _risk_refusal_is_conflict[T](call: Awaitable[T]) -> T:
+    """A change the RiskEngine refused never reached the broker: 409, not a broker error."""
+    try:
+        return await call
+    except OrderRejected as exc:
+        if str(exc).startswith("risk:"):
+            raise Conflict(str(exc)) from None
+        raise
 
 
 def _audit_out(e: AuditEntry) -> s.AuditOut:

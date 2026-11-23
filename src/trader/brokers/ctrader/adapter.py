@@ -26,10 +26,12 @@ from pydantic import SecretStr
 from trader.brokers.base import BrokerAck, Capabilities, OrderChanges, RateLimits
 from trader.domain.enums import ConnectionState, OrderStatus, OrderType, PositionChange, Side, Timeframe
 from trader.domain.errors import (
+    AuthExpired,
     BrokerError,
     BrokerUnavailable,
     InvalidPrice,
     InvalidVolume,
+    LiveTradingNotConfirmed,
     OrderNotFound,
     OrderRejected,
     PositionNotFound,
@@ -234,6 +236,7 @@ class CTraderBroker:
             )
             if self._tokens.expires_within(self._clock.now(), self._s.token_refresh_margin):
                 await self._refresh_tokens(transport)
+            await self._check_environment(transport)
             await transport.request(
                 msgs.ProtoOAAccountAuthReq(
                     ctidTraderAccountId=self._s.ctid_trader_account_id,
@@ -321,6 +324,30 @@ class CTraderBroker:
             self._set_connection(ConnectionState.DOWN, str(error) if error else "connection closed")
         if self._reconnect_task is None or self._reconnect_task.done():
             self._reconnect_task = asyncio.create_task(self._reconnect(), name="ctrader-reconnect")
+
+    async def _check_environment(self, transport: Transport) -> None:
+        """Ask the broker whether the account is live or demo, and refuse a mismatch with the config. The
+        host decides the server (a ``host`` override can point anywhere), so the broker's own ``isLive``
+        flag is the check that keeps a demo-mode run off a live account."""
+        res = await transport.request(
+            msgs.ProtoOAGetAccountListByAccessTokenReq(
+                accessToken=self._tokens.access_token.get_secret_value()
+            ),
+            msgs.ProtoOAGetAccountListByAccessTokenRes,
+        )
+        ctid = self._s.ctid_trader_account_id
+        account = next((a for a in res.ctidTraderAccount if a.ctidTraderAccountId == ctid), None)
+        if account is None:
+            raise AuthExpired(f"ctidTraderAccountId {ctid} is not authorised for this access token")
+        if not account.HasField("isLive"):
+            _log.warning("ctrader_account_kind_unknown", ctid=ctid, detail="isLive not reported")
+            return
+        live = account.isLive
+        if live != (self._s.environment == "live"):
+            raise LiveTradingNotConfirmed(
+                f"cTrader account {ctid} is a {'LIVE' if live else 'demo'} account but the config says "
+                f"environment: {self._s.environment}; refusing to connect"
+            )
 
     async def _reconnect(self) -> None:
         attempt = 0

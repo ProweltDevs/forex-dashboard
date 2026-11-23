@@ -225,7 +225,11 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     args = _parser().parse_args(argv)
     process_env: Mapping[str, str] = os.environ if env is None else env
     # .env fills in secrets; the process environment wins on conflicts.
-    merged = {**read_env_file(args.env_file), **process_env}
+    try:
+        merged = {**read_env_file(args.env_file), **process_env}
+    except ConfigError as exc:  # e.g. a .env others can read
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
     if args.command == "secrets-key":
         return _secrets_key(args.env_file, merged)
     if args.command == "ctrader-auth":

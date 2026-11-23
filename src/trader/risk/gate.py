@@ -15,7 +15,7 @@ from decimal import Decimal
 from trader.domain.enums import KillLevel
 from trader.domain.events import DomainEvent
 from trader.domain.jsontypes import JsonObj
-from trader.domain.models import AccountState, Instrument, Order, OrderIntent, Position, Tick
+from trader.domain.models import AccountState, Instrument, Order, OrderIntent, OrderRequest, Position, Tick
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -78,6 +78,14 @@ class RiskGate:
     def pre_trade(self, intent: OrderIntent, view: AccountView) -> RiskVerdict:
         """Approve or reject a new order."""
         raise NotImplementedError
+
+    def pre_modify(self, current: OrderRequest, modified: OrderIntent, view: AccountView) -> RiskVerdict:
+        """Approve or reject a change to a pending order (``modified`` = the order after the change)."""
+        return RiskVerdict.approve(rule="modify", reason="no modification rules")
+
+    def pre_modify_position(self, position: Position, sl: Decimal | None, view: AccountView) -> RiskVerdict:
+        """Approve or reject a new stop for an open position (``None`` removes it)."""
+        return RiskVerdict.approve(rule="modify_position", reason="no modification rules")
 
     def on_tick(self, tick: Tick) -> None:
         """Every tick, synchronously (keep it O(1))."""

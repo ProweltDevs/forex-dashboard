@@ -41,6 +41,7 @@ class MarketDataService:
         self.feeds: Bus[FeedEvent] = Bus()
         self._builders: dict[str, BarBuilder] = {}
         self._monitors: dict[str, StaleFeedMonitor] = {}
+        self._unrecorded: set[str] = set()  # feeds the recorder skips (synthetic prices)
         self.candles = CandleStore(data_dir)
         self.recorder: TickRecorder | None = (
             TickRecorder(
@@ -118,6 +119,11 @@ class MarketDataService:
 
     # ------------------------------------------------------------------ hot path
 
+    def exclude_from_recording(self, feed: str) -> None:
+        """Never record this feed's ticks: synthetic random-walk prices must not end up in the tick dataset
+        the backtester will replay as market data."""
+        self._unrecorded.add(feed)
+
     def on_tick(self, broker: str, tick: Tick) -> list[Bar]:
         before = self.ticks.last(tick.symbol, broker)
         self.ticks.publish(TickEvent(tick=tick, broker=broker))
@@ -169,7 +175,12 @@ class MarketDataService:
             return
         self._tasks.append(asyncio.create_task(self._timer(tick_interval), name="marketdata-timer"))
         if self.recorder is not None:
-            sub = self.ticks.subscribe("tick-recorder", policy=Overflow.LOSSLESS, maxsize=200_000)
+            sub = self.ticks.subscribe(
+                "tick-recorder",
+                policy=Overflow.LOSSLESS,
+                maxsize=200_000,
+                accept=lambda e: e.broker not in self._unrecorded,
+            )
             self._tasks.append(asyncio.create_task(self.recorder.run(sub), name="tick-recorder"))
 
     async def _timer(self, interval: timedelta) -> None:

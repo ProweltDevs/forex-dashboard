@@ -279,3 +279,71 @@ async def test_strategy_lifecycle(run: Running) -> None:
     assert ids == ["ema", "donchian", "rsi", "ema2"]
     assert run.app.runner is not None
     assert all(stats.total_errors == 0 for _sid, _st, _r, stats in run.app.runner.status())
+
+
+async def test_manual_trading_commands(tmp_path: Path) -> None:
+    """SPEC §6 manual commands: modify (risk-checked), close all for a symbol or strategy, flatten."""
+    async with running_app(api_config(tmp_path, strategies=[])) as r:
+        c = r.client
+        oms = r.app.accounts[ACCOUNT].oms
+        await wait_for(lambda: oms.view().last_ticks, what="ticks")
+        bid, _ = r.price()
+        limit = bid - Decimal("0.0200")
+        pending = (
+            await c.post(
+                "/orders",
+                json={
+                    "account": ACCOUNT, "symbol": "EURUSD", "side": "BUY", "volume": "0.01",
+                    "order_type": "LIMIT", "limit_price": str(limit), "sl": str(limit - Decimal("0.0050")),
+                },
+            )
+        ).json()  # fmt: skip
+        cid = pending["client_order_id"]
+        assert pending["status"] in ("ACCEPTED", "WORKING"), pending
+
+        too_big = await c.patch(f"/orders/{cid}", json={"volume": "5"})
+        assert too_big.status_code == 409
+        assert too_big.json()["detail"].startswith("risk:max_order_volume")
+        assert (await c.patch(f"/orders/{cid}", json={})).status_code == 422  # nothing to change
+        assert (await c.patch("/orders/nope", json={"volume": "0.02"})).status_code == 404
+        ok = await c.patch(f"/orders/{cid}", json={"volume": "0.02"})
+        assert ok.status_code == 200, ok.text
+        await wait_for(
+            lambda: oms.order(cid) is not None and oms.order(cid).request.volume == Decimal("0.02")
+        )  # type: ignore[union-attr]
+
+        market = {"account": ACCOUNT, "symbol": "EURUSD", "side": "BUY", "volume": "0.01"}
+        bid, _ = r.price()
+        await c.post("/orders", json=market | {"sl": str(bid - Decimal("0.0050"))})
+        await wait_for(lambda: oms.positions(), what="a position")
+        [pos] = oms.positions()
+        unprotected = await c.patch(
+            f"/positions/{pos.position_id}", json={"account": ACCOUNT, "remove_sl": True}
+        )
+        assert unprotected.status_code == 409
+        assert unprotected.json()["detail"].startswith("risk:loss_per_trade")
+        assert pos.sl is not None
+        tighter = pos.sl + Decimal("0.0010")
+        moved = await c.patch(f"/positions/{pos.position_id}", json={"account": ACCOUNT, "sl": str(tighter)})
+        assert moved.status_code == 200, moved.text
+        await wait_for(lambda: oms.positions() and oms.positions()[0].sl == tighter, what="the new stop")
+
+        closed = await c.post("/positions/close-all", json={"account": ACCOUNT, "strategy": "nobody"})
+        assert closed.json()["message"] == "0 close/cancel requests sent"  # another strategy: nothing
+        assert oms.positions()
+        flat = await c.post(f"/accounts/{ACCOUNT}/flatten", json={"reason": "end of test"})
+        assert flat.json()["message"] == "2 close/cancel requests sent"  # the position and the pending order
+        await wait_for(lambda: not oms.positions() and not oms.view().open_orders, what="flat")
+        assert oms.risk_level.value == "NONE"  # flatten does not latch the kill switch
+
+        actions = [a["action"] for a in (await c.get("/audit")).json()]
+        assert actions[:6] == [
+            "flatten",
+            "close_all",
+            "position_modify",
+            "position_modify",
+            "order_submit",
+            "order_modify",
+        ]
+        refused = (await c.get("/audit?action=position_modify")).json()[-1]
+        assert refused["result"].startswith("error: OrderRejected: risk:loss_per_trade")

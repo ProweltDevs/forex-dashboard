@@ -6,7 +6,7 @@
     any non-terminal -> CANCELLED | REJECTED | EXPIRED
     Terminal: FILLED, CANCELLED, REJECTED, EXPIRED
 
-See docs/adr/0002-order-state-machine.md for the edges added beyond the spec diagram.
+See docs/adr/0002-domain-model-and-order-state-machine.md for the edges added beyond the spec diagram.
 """
 
 from __future__ import annotations

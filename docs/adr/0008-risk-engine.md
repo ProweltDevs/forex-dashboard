@@ -145,10 +145,10 @@ It exits 0 when done, 1 on timeout, and 2 on config or broker errors. Live accou
 and `--confirm-live`, the same guard as `trader run`. Paper accounts are refused: their state lives only
 inside the trading process.
 
-Until the long-running process exists (phase 7) this is a standalone emergency tool. It must not run
-while another process manages the same account, because both would write the snapshot. Once
-`trader run` exists, the same command will be routed to the running process, with the API following in
-phase 10.
+It is the emergency tool for when `trader run` is **not** running. While it runs, use its API
+(`POST /risk/kill`) or Telegram (`/kill`). The two processes must never both write one account's snapshot:
+since phase 12 the OMS state file is locked (`flock`) by whichever process owns it, so `trader kill` against
+a running process is refused with that advice instead of being silently undone.
 
 ## Consequences and limits
 
@@ -156,7 +156,13 @@ phase 10.
   Balance-operation tracking arrives with portfolio accounting (phase 8).
 - Exposure and margin estimates use our own formula (`domain/accounting.margin_required`); the broker
   remains the final check.
-- Order modifications are not risk-checked. Lowering an SL's distance can only reduce the loss; widening it
-  is a strategy decision we don't block yet.
+- **Modifications are risk-checked (phase 12).** `RiskGate.pre_modify` sees a pending order as it would be
+  after the change; a change that adds risk (more volume, a new entry price, a stop removed or moved away)
+  goes through the kill switch and every pre-trade rule except the rate rules (a modification is not a new
+  order), with the order's own exposure replaced, not added. `pre_modify_position` checks a removed or
+  widened position stop against the kill switch, `require_sl` and the loss per trade from the current
+  price. Risk-reducing changes (tightening, trailing, break-even, cutting volume, adding a stop) always
+  pass, also under a kill switch. OMS-generated exits (trailing, break-even) only tighten and bypass the
+  check by design.
 - Risk hooks run on the OMS writer, so a slow rule would delay order handling. Every rule is O(positions
   + orders).

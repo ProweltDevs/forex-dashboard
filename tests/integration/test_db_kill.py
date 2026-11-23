@@ -82,7 +82,9 @@ async def test_db_kill_trading_continues_and_data_is_replayed(pg_own: TempPostgr
     # The database now holds exactly what the books hold.
     ledger_ids = {e.fill.fill_id for e in books.portfolio.ledger.entries()}
     db_fills = {r[0] for r in await query(pg_own.url, "select fill_id from fills")}
-    assert db_fills == ledger_ids
+    assert db_fills == ledger_ids, (
+        f"only in the db: {db_fills - ledger_ids}; only in the ledger: {ledger_ids - db_fills}"
+    )
     oms_orders = {o.client_order_id: o.status.value for o in app.accounts["paper-main"].oms.orders()}
     db_orders = dict(await query(pg_own.url, "select client_order_id, status from orders"))
     assert db_orders == oms_orders

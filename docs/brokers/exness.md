@@ -7,7 +7,9 @@ guides under <https://www.exness-api.com/trading/>, read on 2026-11-22. The chan
 (`uv run pytest -m demo tests/contract/test_exness_probes.py -s`).
 
 > The API works only with **Exness-platform** accounts (not MT4/MT5). The host does not separate demo from
-> real accounts, so the demo tests refuse to run unless `EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes`.
+> real accounts, so the demo tests refuse to run unless `EXNESS_DEMO_CONFIRM_DEMO_ACCOUNT=yes`, and since
+> phase 12 so do `trader run` and `trader kill` for any `environment: demo` Exness account
+> (`<secrets_ref>_CONFIRM_DEMO_ACCOUNT=yes`): no API field tells a demo account from a real one.
 
 ## Hosts and credentials
 

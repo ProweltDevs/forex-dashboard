@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from trader.config.secrets import load_secrets
+from trader.config.secrets import load_secrets, require_private
 from trader.config.settings import AccountConfig
 from trader.domain.errors import ConfigError
 from trader.domain.time import Clock
@@ -137,10 +137,21 @@ def _exness_factory(account: AccountConfig, deps: BrokerDeps) -> Broker:
         path = Path(key_file).expanduser()
         if not path.is_file():
             raise ConfigError(f"{account.secrets_ref}_PRIVATE_KEY_FILE does not point to a file")
+        require_private(path)
         private_key = SecretStr(path.read_text(encoding="utf-8"))
     if private_key is None:
         raise ConfigError(
             f"missing secrets: {account.secrets_ref}_PRIVATE_KEY (or {account.secrets_ref}_PRIVATE_KEY_FILE)"
+        )
+    confirm = f"{account.secrets_ref}_CONFIRM_DEMO_ACCOUNT"
+    if account.environment == "demo" and deps.env.get(confirm, "").strip().lower() != "yes":
+        # Exness serves demo and real accounts from the same hosts and no API field tells them apart
+        # (docs/brokers/exness.md), so the `environment: demo` label alone cannot keep real money out of a
+        # demo-mode run. Same guard as the demo tests.
+        raise ConfigError(
+            f"account {account.id!r}: set {confirm}=yes only after checking in the Exness Personal Area that "
+            f"trading account {account.account_id} is a DEMO account (Exness hosts do not separate demo "
+            "from real accounts)"
         )
     settings = ExnessSettings(
         account_id=account.id,

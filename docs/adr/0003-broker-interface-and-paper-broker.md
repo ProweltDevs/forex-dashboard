@@ -21,7 +21,8 @@ Status: accepted (phase 1)
 ## Registry (`brokers/registry.py`)
 
 `BrokerRegistry` maps the config `broker` name to a factory `(AccountConfig, BrokerDeps) -> Broker`.
-`default_registry()` registers `paper` only; `exness`/`ctrader` fail with a clear `ConfigError` until phases 2–3.
+`default_registry()` registers `paper`, `ctrader` and `exness` (phases 2–3 added the last two; each
+adapter is imported lazily, only when an account uses it).
 `BrokerDeps` carries the clock, the env mapping (for `secrets_ref`) and, for paper, a `MarketDataSource`.
 
 ## Paper broker (`brokers/paper/`)

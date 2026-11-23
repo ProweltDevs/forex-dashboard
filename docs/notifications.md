@@ -56,8 +56,8 @@ a position closed in a form every adapter shares, so this says what the prices s
   could send them. Others are ignored and logged (without who or what).
 - Messages older than **2 minutes** are ignored, so a `/kill` typed while the process was down is not
   replayed later.
-- **Resetting the kill switch is not possible from Telegram:** use the API (`POST /risk/reset`) or
-  `trader kill --reset`.
+- **Resetting the kill switch is not possible from Telegram:** use the API (`POST /risk/reset`), or
+  `trader kill --reset` once `trader run` is stopped (it is refused while the process owns the account).
 - Every command goes through the same `Control` facade as the API and is **audited with actor
   `telegram`**.
 

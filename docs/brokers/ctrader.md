@@ -14,6 +14,7 @@ that settles it (`uv run pytest -m demo tests/contract/test_ctrader_probes.py -s
 |---|---|---|
 | V | Demo `demo.ctraderapi.com`, live `live.ctraderapi.com`; **5035 = Protobuf**, 5036 = JSON. Both ports accept TCP and WebSocket. | [proxies-endpoints](https://help.ctrader.com/open-api/proxies-endpoints/) |
 | V | Demo and live are fully separate: a live endpoint cannot use demo accounts and vice versa. One connection per environment. | same |
+| V | `ProtoOAGetAccountListByAccessTokenRes` lists each `ctidTraderAccount` with `isLive`. The adapter checks it against `environment:` at every connect and refuses a mismatch (`LiveTradingNotConfirmed`), so a `host` override cannot put a demo-mode run on a live account. | vendored `OpenApiMessages.proto`, `ctrader-auth` |
 | V | The TCP connection **must use SSL**. | [connection](https://help.ctrader.com/open-api/connection/) |
 | V | Frame = **4-byte big-endian length** + serialised `ProtoMessage{payloadType, payload, clientMsgId}`. The page's Python snippet shows `struct.pack("!H")` (2 bytes); that contradicts its C# code and its own read instructions (4 bytes). We use 4 bytes. | [sending-receiving-protobuf](https://help.ctrader.com/open-api/sending-receiving-protobuf/) |
 | V | Messages sent before app authorisation get an error. Send `ProtoHeartbeatEvent` **every 10 s** to stay connected; idle connections are dropped. | [connection](https://help.ctrader.com/open-api/connection/), [faq](https://help.ctrader.com/open-api/faq/) |

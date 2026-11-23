@@ -11,6 +11,8 @@ from trader.config.settings import AppConfig
 from trader.domain.enums import TradingMode
 from trader.domain.errors import ConfigError, LiveTradingNotConfirmed
 
+# Never the developer's real ./.env: tests must not see real credentials.
+NO_DOTENV = ["--env-file", "/nonexistent/trader-tests.env"]
 ROOT = Path(__file__).resolve().parents[2]
 
 LIVE = {
@@ -131,15 +133,15 @@ def test_load_secrets() -> None:
 
 
 def test_cli_check_config_paper(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["check-config", "--config", str(ROOT / "config/paper.yaml")], env={}) == 0
+    assert main([*NO_DOTENV, "check-config", "--config", str(ROOT / "config/paper.yaml")], env={}) == 0
     assert "mode=paper" in capsys.readouterr().out
 
 
 def test_cli_refuses_live_without_confirmation(capsys: pytest.CaptureFixture[str]) -> None:
     path = str(ROOT / "config/live.yaml.example")
-    assert main(["run", "--config", path], env={"TRADER_MODE": "live"}) == 2
+    assert main([*NO_DOTENV, "run", "--config", path], env={"TRADER_MODE": "live"}) == 2
     assert "confirm-live" in capsys.readouterr().err
-    assert main(["run", "--config", path, "--confirm-live"], env={}) == 2
+    assert main([*NO_DOTENV, "run", "--config", path, "--confirm-live"], env={}) == 2
 
 
 def test_cli_live_banner_when_confirmed(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
@@ -165,3 +167,16 @@ def test_live_example_spells_out_exactly_the_risk_defaults() -> None:
     config = load_config(ROOT / "config/live.yaml.example")
     assert config.accounts[0].risk == RiskConfig()
     assert set(config.accounts[0].risk.limits.model_fields_set) == set(RiskLimits.model_fields)
+
+
+def test_secrets_file_must_be_private(tmp_path: Path) -> None:
+    from trader.config.secrets import read_env_file
+
+    env = tmp_path / ".env"
+    env.write_text("TRADER_API_TOKEN=x\n")
+    env.chmod(0o644)
+    with pytest.raises(ConfigError, match="mode 0644: run `chmod 600"):
+        read_env_file(env)
+    env.chmod(0o600)
+    assert read_env_file(env) == {"TRADER_API_TOKEN": "x"}
+    assert read_env_file(tmp_path / "missing.env") == {}  # no file: nothing to check
