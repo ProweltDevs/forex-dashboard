@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.api_helpers import api_config
+from tests.integration.api_helpers import api_config, wait_for
 from trader.app import App
+from trader.domain.enums import KillLevel
 from trader.domain.errors import ConfigError
 from trader.domain.time import SystemClock
 from trader.oms import AccountLocked, JsonFileStore
@@ -27,19 +28,32 @@ def test_the_state_file_has_one_owner(tmp_path: Path) -> None:
 
 
 async def test_a_second_app_on_the_same_data_dir_is_refused(tmp_path: Path) -> None:
-    config = api_config(tmp_path, api={"enabled": False})
+    # No strategies: nothing but this test changes the owner's state, so the file content is predictable.
+    config = api_config(tmp_path, api={"enabled": False}, strategies=[])
+    snapshot = tmp_path / "oms" / "paper-main.json"
     app = App(config, env={}, clock=SystemClock())
     await app.start()
     try:
-        snapshot = (tmp_path / "oms" / "paper-main.json").read_bytes()
+        oms = app.accounts["paper-main"].oms
+        await oms.kill_switch(KillLevel.PAUSE_NEW, "owner state")  # the owner persists it
+        await wait_for(lambda: snapshot.exists() and "PAUSE_NEW" in snapshot.read_text(), what="snapshot")
+        before = snapshot.read_bytes()
+
         intruder = App(config, env={}, clock=SystemClock())
         with pytest.raises(ConfigError, match=r"another process .* manages this account"):
             await intruder.start()
         await intruder.stop()
-        assert app.accounts["paper-main"].oms.ready.is_set()  # the owner trades on
-        assert (tmp_path / "oms" / "paper-main.json").read_bytes() == snapshot  # untouched by the intruder
+        # A refused start never writes: had the intruder saved its empty state, the kill switch would be gone.
+        assert snapshot.read_bytes() == before
+        assert oms.ready.is_set()  # the owner trades on
+        assert oms.risk_level is KillLevel.PAUSE_NEW
     finally:
         await app.stop()
     again = App(config, env={}, clock=SystemClock())  # the lock went with the first app
     await again.start()
-    await again.stop()
+    try:
+        assert (
+            again.accounts["paper-main"].oms.risk_level is KillLevel.PAUSE_NEW
+        )  # the owner's state, restored
+    finally:
+        await again.stop()
